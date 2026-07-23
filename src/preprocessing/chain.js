@@ -1,6 +1,6 @@
 const sharp = require('sharp');
 const fs = require('fs/promises');
-const { runOcrOnce, scoreOcrResult } = require('../ocr/tesseract');
+const { runOcrOnce, scoreOrientationProbe } = require('../ocr/tesseract');
 
 async function autoRotateExif(buffer) {
   return sharp(buffer).rotate().toBuffer();
@@ -147,16 +147,20 @@ async function correctCardOrientation(buffer) {
       .toBuffer();
 
     const result = await runOcrOnce(probe, { tessedit_pageseg_mode: '6' });
-    let score = scoreOcrResult(result);
+    let score = scoreOrientationProbe(result);
     const upper = (result.text || '').toUpperCase();
     if (/CAMSCANNER|SCANNED\s*BY/.test(upper) && score < 80) score -= 50;
 
-    if (score > bestScore) {
+    // Prefer upright (0°) unless another angle clearly wins — inverted probes
+    // on dense white pages can falsely favor 90/270 and wreck OCR.
+    const beatsBest =
+      angle === 0 ? score > bestScore : score >= bestScore + 20;
+    if (beatsBest) {
       bestScore = score;
       bestBuffer = rotated;
       bestAngle = angle;
     }
-    if (score >= 90) break;
+    if (angle === 0 && score >= 90) break;
   }
 
   return { buffer: bestBuffer, angle: bestAngle, score: bestScore };

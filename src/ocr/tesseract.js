@@ -103,6 +103,36 @@ function scoreOcrResult(result) {
   return score;
 }
 
+/**
+ * Orientation probe score — readability only, no ID-pattern bonuses.
+ * ID bonuses (PAN/Aadhaar digit runs) fire on sideways garbage and flip pages.
+ */
+function scoreOrientationProbe(result) {
+  const text = result.text || '';
+  const conf = result.ocrConfidence || 0;
+  const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
+  const letters = (text.match(/[A-Za-z]/g) || []).length;
+  const symbols = (text.match(/[^A-Za-z0-9\s]/g) || []).length;
+  const total = Math.max(text.length, 1);
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const shortRatio = tokens.filter((t) => t.length <= 2).length / Math.max(tokens.length, 1);
+  const longWords = tokens.filter((t) => /[A-Za-z]{4,}/.test(t)).length;
+
+  let score = conf * 0.5 + Math.min(alnum, 400) * 0.15 + longWords * 2;
+  if (symbols / total > 0.2) score -= 50;
+  if (shortRatio > 0.5 && tokens.length > 20) score -= 60;
+  if (letters < 40) score -= 25;
+  // Readable document words (not ID-specific digit patterns)
+  if (
+    /SECURITY|PROGRAMME|PROGRAM|CLEARANCE|CERTIFICATE|COMPANY|AUTHORITY|ORGANI[SZ]ATION|DOCUMENT|VERSION|EMPLOYEE|VALID/i.test(
+      text
+    )
+  ) {
+    score += 35;
+  }
+  return score;
+}
+
 async function runOcrModes(imageBuffer, modes) {
   let best = null;
   let bestScore = -Infinity;
@@ -237,6 +267,7 @@ module.exports = {
   runOcrOnPages,
   runOcrOnce,
   scoreOcrResult,
+  scoreOrientationProbe,
   terminateOcr,
   GOOD_ENOUGH_SCORE,
 };

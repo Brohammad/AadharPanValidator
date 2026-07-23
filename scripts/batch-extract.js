@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 /**
- * Batch-test extraction document types against mock PDFs.
+ * Batch-test the 4 extraction document types across PDF / PNG / JPG mocks.
  * Usage: node scripts/batch-extract.js
- *
- * Generates mocks first if missing.
  */
 const fs = require('fs');
 const path = require('path');
@@ -12,57 +10,97 @@ const { verifyDocument } = require('../src/pipeline/orchestrator');
 const { terminateOcr } = require('../src/ocr/tesseract');
 
 const MOCK_DIR = path.resolve(__dirname, '../assets/mocks');
+const FORMATS = ['pdf', 'png', 'jpg'];
 
-const SAMPLES = [
+const CASES = [
   {
-    id: 1,
     slug: 'cin',
     expectType: 'CIN',
-    file: 'mock-cin.pdf',
-    expectFields: {
-      cinNumber: 'U72900MH2018PTC312456',
-      companyName: /AVIO SECURITY SERVICES/i,
+    files: {
+      cin: {
+        cinNumber: 'U72900MH2018PTC312456',
+        companyName: /AVIO SECURITY SERVICES/i,
+      },
+      'cin-2': {
+        cinNumber: 'L85110DL2020PLC401122',
+        companyName: /SKYLINE AVIATION/i,
+      },
     },
   },
   {
-    id: 2,
     slug: 'security-clearance',
     expectType: 'SECURITY_CLEARANCE',
-    file: 'mock-security-clearance.pdf',
-    expectFields: {
-      employeeName: /RAHUL MEHTA/i,
-      clearanceType: /Airport Entry Permit|Security Clearance/i,
-      clearanceNumber: /SC-BOM-2024-00482/i,
+    files: {
+      'security-clearance': {
+        employeeName: /RAHUL MEHTA/i,
+        clearanceType: /Airport Entry Permit|Security Clearance/i,
+        clearanceNumber: /SC-BOM-2024-00482/i,
+      },
+      'security-clearance-2': {
+        employeeName: /SNEHA KAPOOR/i,
+        clearanceType: /Background Verification|Security Clearance/i,
+        clearanceNumber: /SC-DEL-2025-00901/i,
+      },
     },
   },
   {
-    id: 3,
     slug: 'security-programme',
     expectType: 'SECURITY_PROGRAMME',
-    file: 'mock-security-programme.pdf',
-    expectFields: {
-      programmeTitle: /Airport Security Programme|SECURITY PROGRAMME/i,
-      documentNumber: /ASP-BOM-2024-01/i,
-      version: /3\.2/,
+    files: {
+      'security-programme': {
+        programmeTitle: /Airport Security Programme|SECURITY PROGRAMME/i,
+        documentNumber: /ASP-BOM-2024-01/i,
+        version: /3\.2/,
+      },
+      'security-programme-2': {
+        programmeTitle: /Terminal Security Programme|SECURITY PROGRAM/i,
+        documentNumber: /DOC-ASP-DEL-09/i,
+        version: /1\.0/,
+      },
     },
   },
   {
-    id: 4,
     slug: 'authority-letter',
     expectType: 'AUTHORITY_LETTER',
-    file: 'mock-authority-letter.pdf',
-    expectFields: {
-      authorizedPerson: /PRIYA NAIR/i,
-      companyName: /AVIO SECURITY SERVICES/i,
-      letterReferenceNumber: /ASL\/2024\/092/i,
+    files: {
+      'authority-letter': {
+        authorizedPerson: /PRIYA NAIR/i,
+        companyName: /AVIO SECURITY SERVICES/i,
+        letterReferenceNumber: /ASL\/2024\/092/i,
+      },
+      'authority-letter-2': {
+        authorizedPerson: /AMIT VERMA/i,
+        companyName: /SKYLINE AVIATION/i,
+        letterReferenceNumber: /ASL-DEL-331/i,
+      },
     },
   },
 ];
 
-function ensureMocks() {
-  const missing = SAMPLES.filter((s) => !fs.existsSync(path.join(MOCK_DIR, s.file)));
+function buildSamples() {
+  const samples = [];
+  let id = 1;
+  for (const c of CASES) {
+    for (const [base, expectFields] of Object.entries(c.files)) {
+      for (const fmt of FORMATS) {
+        samples.push({
+          id: id++,
+          slug: c.slug,
+          expectType: c.expectType,
+          file: `${base}.${fmt}`,
+          format: fmt,
+          expectFields,
+        });
+      }
+    }
+  }
+  return samples;
+}
+
+function ensureMocks(samples) {
+  const missing = samples.filter((s) => !fs.existsSync(path.join(MOCK_DIR, s.file)));
   if (missing.length === 0) return;
-  console.log('Generating mock PDFs…');
+  console.log('Generating mocks…');
   const r = spawnSync(process.execPath, [path.join(__dirname, 'generate-mocks.js')], {
     stdio: 'inherit',
   });
@@ -78,12 +116,13 @@ function fieldMatches(actual, expected) {
 }
 
 async function main() {
-  ensureMocks();
+  const samples = buildSamples();
+  ensureMocks(samples);
 
   const results = [];
   let passed = 0;
 
-  for (const sample of SAMPLES) {
+  for (const sample of samples) {
     const filePath = path.join(MOCK_DIR, sample.file);
     const t0 = Date.now();
     try {
@@ -106,8 +145,10 @@ async function main() {
       const modeOk = r.mode === 'extraction';
       const ok = typeOk && modeOk && fieldsOk && !r.error;
 
-      const row = {
+      results.push({
         id: sample.id,
+        file: sample.file,
+        format: sample.format,
         slug: sample.slug,
         expectType: sample.expectType,
         documentType: r.documentType,
@@ -123,14 +164,14 @@ async function main() {
         data: r.data,
         ms: Date.now() - t0,
         error: r.error || null,
-      };
-      results.push(row);
+      });
 
       if (ok) passed++;
       const status = ok ? 'PASS' : 'FAIL';
       console.log(
-        `${String(sample.id).padStart(2)} ${status} ${String(r.documentType).padEnd(20)} ` +
-          `ocr=${r.ocrConfidence} extract=${r.extractionConfidence} ${row.ms}ms | ${sample.slug}`
+        `${String(sample.id).padStart(2)} ${status} ${sample.format.padEnd(3)} ` +
+          `${String(r.documentType).padEnd(20)} ocr=${r.ocrConfidence} ` +
+          `extract=${r.extractionConfidence} ${Date.now() - t0}ms | ${sample.file}`
       );
       if (!ok) {
         for (const [k, v] of Object.entries(fieldChecks)) {
@@ -144,23 +185,38 @@ async function main() {
     } catch (err) {
       results.push({
         id: sample.id,
+        file: sample.file,
+        format: sample.format,
         slug: sample.slug,
         ok: false,
         error: err.message,
         ms: Date.now() - t0,
       });
-      console.error(`ERR ${sample.id} ${sample.slug}: ${err.message}`);
+      console.error(`ERR ${sample.id} ${sample.file}: ${err.message}`);
     }
+  }
+
+  const byFormat = {};
+  for (const fmt of FORMATS) {
+    const rows = results.filter((r) => r.format === fmt);
+    byFormat[fmt] = {
+      passed: rows.filter((r) => r.ok).length,
+      total: rows.length,
+    };
   }
 
   const out = path.resolve(__dirname, '../temp/batch-extract-results.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify(results, null, 2));
-  console.log(`\n${passed}/${SAMPLES.length} passed`);
+  fs.writeFileSync(out, JSON.stringify({ summary: { passed, total: samples.length, byFormat }, results }, null, 2));
+
+  console.log(`\n${passed}/${samples.length} passed`);
+  for (const fmt of FORMATS) {
+    console.log(`  ${fmt}: ${byFormat[fmt].passed}/${byFormat[fmt].total}`);
+  }
   console.log(`Wrote ${out}`);
 
   await terminateOcr();
-  process.exit(passed === SAMPLES.length ? 0 : 1);
+  process.exit(passed === samples.length ? 0 : 1);
 }
 
 main().catch(async (err) => {
