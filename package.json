@@ -1,0 +1,25 @@
+{
+  "name": "avioagent-doc-verifier",
+  "version": "1.0.0",
+  "description": "Offline Aadhaar & PAN document verification with Tesseract OCR",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "batch": "node scripts/batch-verify.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-lib": "^1.17.1",
+    "pdf2pic": "^3.1.3",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "sharp": "^0.33.5",
+    "tesseract.js": "^5.1.1",
+    "uuid": "^11.1.0"
+  }
+}
