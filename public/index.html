@@ -3,17 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Document Verification — Aadhaar & PAN</title>
+  <title>Document Verification</title>
   <link rel="stylesheet" href="/css/styles.css">
 </head>
 <body>
   <div class="container">
     <header>
       <h1>Document Verification</h1>
-      <p class="subtitle">Aadhaar & PAN authenticity check (offline OCR)</p>
+      <p class="subtitle">Choose the document type, then upload — each type has its own API endpoint</p>
     </header>
 
     <section class="upload-section">
+      <label class="field-label" for="docTypeSelect">Document type</label>
+      <select id="docTypeSelect" class="doc-type-select">
+        <option value="">Loading…</option>
+      </select>
+
       <div id="dropZone" class="drop-zone">
         <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf" hidden>
         <p>Drag & drop a document here, or <button type="button" id="browseBtn" class="link-btn">browse</button></p>
@@ -25,7 +30,7 @@
         <p id="fileName" class="file-name"></p>
       </div>
 
-      <button id="verifyBtn" class="btn primary" disabled>Verify Document</button>
+      <button id="verifyBtn" class="btn primary" disabled>Process Document</button>
       <div id="loading" class="loading hidden">
         <div class="spinner"></div>
         <span>Processing document…</span>
@@ -33,29 +38,51 @@
     </section>
 
     <section id="results" class="results hidden">
-      <div class="badges">
+      <div id="verificationBadges" class="badges">
         <div id="validationBadge" class="badge">Validation</div>
         <div id="authenticityBadge" class="badge">Authenticity</div>
         <div id="overallBadge" class="badge overall">Overall</div>
       </div>
 
       <div class="score-grid">
+        <div class="score-card" id="stageCard">
+          <span class="label">Pipeline Stage</span>
+          <span id="pipelineStage" class="value">—</span>
+        </div>
+        <div class="score-card" id="statusCard">
+          <span class="label">Status</span>
+          <span id="pipelineStatus" class="value">—</span>
+        </div>
         <div class="score-card">
           <span class="label">Document Type</span>
           <span id="docType" class="value">—</span>
         </div>
-        <div class="score-card">
+        <div class="score-card" id="authScoreCard">
           <span class="label">Authenticity Score</span>
           <span id="authScore" class="value">—</span>
+        </div>
+        <div class="score-card" id="endpointCard">
+          <span class="label">Endpoint</span>
+          <span id="endpointUsed" class="value">—</span>
         </div>
         <div class="score-card">
           <span class="label">OCR Confidence</span>
           <span id="ocrConf" class="value">—</span>
         </div>
         <div class="score-card">
+          <span class="label">Classification</span>
+          <span id="classConf" class="value">—</span>
+        </div>
+        <div class="score-card">
           <span class="label">Extraction Confidence</span>
           <span id="extractConf" class="value">—</span>
         </div>
+      </div>
+
+      <div id="stopBanner" class="stop-banner hidden"></div>
+      <div id="reasonsBlock" class="reasons-block hidden">
+        <h3>Decision Reasons</h3>
+        <ul id="reasonsList" class="fraud-list"></ul>
       </div>
 
       <div id="extractionIssues" class="issues hidden"></div>
@@ -65,17 +92,22 @@
         <tbody></tbody>
       </table>
 
-      <h3>Category Scores</h3>
-      <div id="categoryScores" class="category-scores"></div>
+      <h3>Full OCR Text</h3>
+      <pre id="ocrText" class="ocr-text"></pre>
 
-      <h3>Fraud Indicators</h3>
-      <ul id="fraudList" class="fraud-list"></ul>
+      <div id="verificationDetails">
+        <h3>Category Scores</h3>
+        <div id="categoryScores" class="category-scores"></div>
 
-      <h3>Quality Warnings</h3>
-      <ul id="qualityList" class="fraud-list"></ul>
+        <h3>Fraud Indicators</h3>
+        <ul id="fraudList" class="fraud-list"></ul>
 
-      <h3>Detector Results</h3>
-      <div id="detectorResults" class="detector-results"></div>
+        <h3>Quality Warnings</h3>
+        <ul id="qualityList" class="fraud-list"></ul>
+
+        <h3>Detector Results</h3>
+        <div id="detectorResults" class="detector-results"></div>
+      </div>
 
       <h3>Image Quality</h3>
       <div id="imageQuality" class="image-quality"></div>

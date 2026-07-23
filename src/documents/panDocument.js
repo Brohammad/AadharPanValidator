@@ -19,31 +19,68 @@ function fuzzyHasPanLabel(text) {
 
 class PanDocument extends BaseDocument {
   constructor() {
-    super('PAN', 'PAN Card');
+    super('PAN', 'PAN Card', { mode: 'verification' });
   }
 
   identify(features) {
     let score = 0;
-    const { signals, upperText, text } = features;
+    const reasons = [];
+    const signals = {};
+    const { signals: feat, upperText, text } = features;
 
-    if (signals.hasPanLabel || fuzzyHasPanLabel(upperText)) score += 35;
-    if (signals.hasIncomeTax || fuzzyHasIncomeTax(text)) score += 30;
-    if (signals.hasGovernmentOfIndia) score += 15;
+    if (
+      /\bPASSPORT\b|P<[A-Z]{3}|SURNAME|GIVEN\s*NAME|<{3,}/i.test(text) ||
+      /\bAADHA+R\b|आधार|UIDAI/i.test(text)
+    ) {
+      reasons.push('Strong non-PAN document signals — rejecting PAN match');
+      signals.wrongDocType = true;
+      return { score: 0, reasons, signals };
+    }
+
+    if (feat.hasPanLabel || fuzzyHasPanLabel(upperText)) {
+      score += 35;
+      reasons.push('Matched Permanent Account Number / PAN keyword');
+      signals.panKeyword = true;
+    }
+    if (feat.hasIncomeTax || fuzzyHasIncomeTax(text)) {
+      score += 30;
+      reasons.push('Matched Income Tax Department');
+      signals.incomeTax = true;
+    }
+    if (feat.hasGovernmentOfIndia) {
+      score += 15;
+      reasons.push('Matched Government of India');
+      signals.goi = true;
+    }
 
     const pans = extractPanNumbers(text);
-    if (pans.length > 0) score += 50; // valid PAN pattern is decisive
-    else if (/[A-Z]{5}\s*[0-9OISB]{4}\s*[A-Z]/i.test(upperText)) score += 30;
+    if (pans.length > 0) {
+      score += 50;
+      reasons.push(`Matched PAN regex (${pans[0]})`);
+      signals.panRegex = true;
+    } else if (/[A-Z]{5}\s*[0-9OISB]{4}\s*[A-Z]/i.test(upperText)) {
+      score += 30;
+      reasons.push('Matched fuzzy PAN pattern');
+      signals.panFuzzy = true;
+    }
 
-    if (/FATHER|पिता|FATHER|FATHE/i.test(upperText)) score += 10;
-    if (signals.hasQrLikeRegion || signals.hasPhotoLikeRegion) score += 10;
+    if (/FATHER|पिता|FATHE/i.test(upperText)) {
+      score += 10;
+      reasons.push("Matched Father's Name field");
+    }
+    if (feat.hasQrLikeRegion || feat.hasPhotoLikeRegion) {
+      score += 10;
+      reasons.push('Photo / QR-like region detected');
+    }
 
-    // Scanned physical cards (CamScanner) still count as documents when PAN found
-    if (signals.hasCamScanner && pans.length > 0) score += 10;
+    if (feat.hasCamScanner && pans.length > 0) {
+      score += 10;
+      reasons.push('CamScanner + PAN pattern');
+    }
 
-    // Strong ID signal alone should clear threshold even with weak keywords
     if (pans.length > 0 && score < 40) score = 40;
 
-    return Math.min(score, 100);
+    return { score: Math.min(score, 100), reasons, signals };
   }
 
   extract(ocr) {
@@ -108,6 +145,24 @@ class PanDocument extends BaseDocument {
       reason: result.valid ? null : result.reason,
       normalized: result.normalized,
     };
+  }
+
+  normalizeData(data, validationResult) {
+    if (validationResult?.normalized) {
+      return { ...data, pan: validationResult.normalized };
+    }
+    return data;
+  }
+
+  /** Slim detector set — full suite is too slow for interactive uploads */
+  authenticityChecks() {
+    return [
+      'checksumValidator',
+      'layoutDetector',
+      'logoDetector',
+      'ocrQualityDetector',
+      'screenshotDetector',
+    ];
   }
 }
 

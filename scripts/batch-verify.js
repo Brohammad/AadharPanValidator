@@ -42,7 +42,44 @@ async function main() {
 
     const t0 = Date.now();
     try {
-      const r = await verifyDocument(filePath, path.basename(filePath), `batch-${sample.id}`);
+      const typeSlug = String(sample.expect).toLowerCase();
+      // Skip non-document expectation labels for explicit-type API
+      if (sample.expect === 'FAKE' || sample.expect === 'UNKNOWN') {
+        // Still run as the closest real type when labeled FAKE notes — use expected ID type from label
+        const asType = /PAN/i.test(sample.label) ? 'pan' : /Aadhaar/i.test(sample.label) ? 'aadhaar' : null;
+        if (!asType) {
+          results.push({ id: sample.id, label: sample.label, skipped: true, reason: 'no type for UNKNOWN' });
+          console.log(`SKIP ${sample.id} ${sample.label} — no explicit type`);
+          continue;
+        }
+        const r = await verifyDocument(filePath, path.basename(filePath), `batch-${sample.id}`, asType);
+        const row = {
+          id: sample.id,
+          label: sample.label,
+          expect: sample.expect,
+          type: r.documentType,
+          V: r.validation?.passed,
+          A: r.authenticity?.passed,
+          score: r.authenticity?.score,
+          overall: r.overallPassed,
+          ocr: r.ocrConfidence,
+          extract: r.extractionConfidence,
+          data: r.data,
+          fraud: r.fraudIndicators || [],
+          warnings: r.qualityWarnings || [],
+          ms: Date.now() - t0,
+        };
+        results.push(row);
+        console.log(
+          `${sample.id.toString().padStart(2)} ${String(r.documentType).padEnd(8)} ` +
+            `V=${r.validation?.passed} A=${r.authenticity?.passed} score=${r.authenticity?.score} ` +
+            `ocr=${r.ocrConfidence} ${r.overallPassed ? 'PASS' : 'FAIL'} ` +
+            `${row.ms}ms | ${sample.label} | name=${r.data?.name || '—'}`
+        );
+        continue;
+      }
+
+      const r = await verifyDocument(filePath, path.basename(filePath), `batch-${sample.id}`, typeSlug);
       const row = {
         id: sample.id,
         label: sample.label,

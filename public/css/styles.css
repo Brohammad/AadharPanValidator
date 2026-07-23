@@ -42,6 +42,24 @@ header h1 {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+.field-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+  color: #444;
+}
+
+.doc-type-select {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  margin-bottom: 1rem;
+  background: #fff;
+}
+
 .drop-zone {
   border: 2px dashed #c5cad3;
   border-radius: 8px;
@@ -215,6 +233,29 @@ header h1 {
   font-size: 0.9rem;
 }
 
+.stop-banner {
+  background: #fde8e8;
+  border: 1px solid #e35d5d;
+  color: #8a1f1f;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.reasons-block {
+  margin-bottom: 1rem;
+}
+
+.value.status-stopped {
+  color: #c0392b;
+}
+
+.value.status-completed {
+  color: #1e7e34;
+}
+
 h3 {
   font-size: 1rem;
   margin: 1.25rem 0 0.5rem;
@@ -305,6 +346,31 @@ h3 {
 
 .detector-item .status.pass { color: #155724; }
 .detector-item .status.fail { color: #721c24; }
+
+.ocr-text {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 1rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.field-pre {
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pre-cell {
+  max-width: 420px;
+}
 
 .error-area {
   background: #f8d7da;

@@ -1,28 +1,50 @@
-const { verifyDocument } = require('../pipeline/orchestrator');
+const { processDocument } = require('../pipeline/orchestrator');
+const { listDocumentTypes, getDocumentBySlug } = require('../documents/registry');
 const { removeFile } = require('../utils/fileCleanup');
 const logger = require('../logger');
 
-async function verify(req, res, next) {
+async function listTypes(_req, res) {
+  res.json({ documents: listDocumentTypes() });
+}
+
+async function processBySlug(req, res, next) {
   const startTime = Date.now();
   const file = req.file;
+  const slug = req.params.slug;
+
+  if (!getDocumentBySlug(slug)) {
+    return res.status(404).json({
+      error: `Unknown document endpoint "/api/${slug}".`,
+      documents: listDocumentTypes(),
+    });
+  }
 
   if (!file) {
     return res.status(400).json({ error: 'No document uploaded. Use field name "document".' });
   }
 
   try {
-    const result = await verifyDocument(file.path, file.originalname, req.requestId);
+    const result = await processDocument(file.path, file.originalname, req.requestId, slug);
 
     logger.info({
       requestId: req.requestId,
       processingTime: Date.now() - startTime,
       filename: file.originalname,
+      endpoint: `/api/${slug}`,
+      stage: result.stage,
+      status: result.status,
+      stopReason: result.status === 'stopped' ? result.reason : null,
       documentType: result.documentType,
-      authenticityScore: result.authenticity?.score,
-      validationPassed: result.validation?.passed,
-      authenticityPassed: result.authenticity?.passed,
+      mode: result.mode,
+      ocrConfidence: result.ocrConfidence,
+      classificationConfidence: result.classificationConfidence,
+      extractionConfidence: result.extractionConfidence,
+      validationPassed: result.validation?.passed ?? null,
+      authenticityScore: result.authenticity?.score ?? null,
+      authenticityPassed: result.authenticity?.passed ?? null,
+      overallPassed: result.overallPassed,
       fraudIndicators: result.fraudIndicators,
-      rejectionReasons: result.rejectionReasons,
+      timings: result.timings,
     });
 
     res.json(result);
@@ -33,4 +55,4 @@ async function verify(req, res, next) {
   }
 }
 
-module.exports = { verify };
+module.exports = { listTypes, processBySlug };

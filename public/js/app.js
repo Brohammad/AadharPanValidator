@@ -8,11 +8,37 @@ const fileNameEl = document.getElementById('fileName');
 const loading = document.getElementById('loading');
 const results = document.getElementById('results');
 const errorArea = document.getElementById('errorArea');
+const docTypeSelect = document.getElementById('docTypeSelect');
 
 let selectedFile = null;
+let lastEndpoint = null;
+let documentTypes = [];
+
+async function loadDocumentTypes() {
+  try {
+    const res = await fetch('/api/documents');
+    const data = await res.json();
+    documentTypes = data.documents || [];
+    docTypeSelect.innerHTML = documentTypes
+      .map(
+        (d) =>
+          `<option value="${d.slug}">${d.label} (${d.mode}) — ${d.endpoint}</option>`
+      )
+      .join('');
+    updateVerifyEnabled();
+  } catch (err) {
+    docTypeSelect.innerHTML = '<option value="">Failed to load types</option>';
+    showError('Could not load document types from /api/documents');
+  }
+}
+
+function updateVerifyEnabled() {
+  verifyBtn.disabled = !(selectedFile && docTypeSelect.value);
+}
 
 browseBtn.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('click', () => fileInput.click());
+docTypeSelect.addEventListener('change', updateVerifyEnabled);
 
 dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
@@ -35,9 +61,9 @@ function handleFile(file) {
   selectedFile = file;
   fileNameEl.textContent = file.name;
   previewArea.classList.remove('hidden');
-  verifyBtn.disabled = false;
   results.classList.add('hidden');
   errorArea.classList.add('hidden');
+  updateVerifyEnabled();
 
   if (file.type === 'application/pdf') {
     previewContent.innerHTML = `<embed src="${URL.createObjectURL(file)}" type="application/pdf" width="100%" height="300">`;
@@ -47,22 +73,24 @@ function handleFile(file) {
 }
 
 verifyBtn.addEventListener('click', async () => {
-  if (!selectedFile) return;
+  if (!selectedFile || !docTypeSelect.value) return;
 
   loading.classList.remove('hidden');
   verifyBtn.disabled = true;
   results.classList.add('hidden');
   errorArea.classList.add('hidden');
 
+  const slug = docTypeSelect.value;
+  lastEndpoint = `/api/${slug}`;
   const formData = new FormData();
   formData.append('document', selectedFile);
 
   try {
-    const res = await fetch('/api/verify', { method: 'POST', body: formData });
+    const res = await fetch(lastEndpoint, { method: 'POST', body: formData });
     const data = await res.json();
 
     if (!res.ok) {
-      showError(data.error || 'Verification failed');
+      showError(data.error || 'Processing failed');
       return;
     }
 
@@ -71,7 +99,7 @@ verifyBtn.addEventListener('click', async () => {
     showError(err.message || 'Network error');
   } finally {
     loading.classList.add('hidden');
-    verifyBtn.disabled = false;
+    updateVerifyEnabled();
   }
 });
 
@@ -86,18 +114,95 @@ function setBadge(el, passed, label) {
   if (el.classList.contains('overall')) el.classList.add('overall');
 }
 
+function formatValue(val) {
+  if (val == null || val === '') return '—';
+  if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+  if (Array.isArray(val)) {
+    if (val.length === 0) return '—';
+    if (val.every((v) => typeof v === 'string' || typeof v === 'number')) {
+      return val.join(', ');
+    }
+    return JSON.stringify(val, null, 2);
+  }
+  if (typeof val === 'object') return JSON.stringify(val, null, 2);
+  return String(val);
+}
+
+const GENERIC_KEYS = new Set([
+  'fullOcrText',
+  'names',
+  'organizations',
+  'dates',
+  'addresses',
+  'emailAddresses',
+  'phoneNumbers',
+  'documentNumbers',
+  'registrationNumbers',
+  'referenceNumbers',
+  'qrCodes',
+  'barcodes',
+  'tables',
+  'headers',
+  'footers',
+  'sectionHeadings',
+  'bulletLists',
+  'signaturePresence',
+  'stampPresence',
+]);
+
 function renderResults(data) {
   results.classList.remove('hidden');
 
-  setBadge(document.getElementById('validationBadge'), data.validation?.passed, 'Validation');
-  setBadge(document.getElementById('authenticityBadge'), data.authenticity?.passed, 'Authenticity');
-  setBadge(document.getElementById('overallBadge'), data.overallPassed, 'Overall');
+  const stopped = data.status === 'stopped';
+  const isExtraction = data.mode === 'extraction' || (stopped && !data.validation);
+  const verificationBadges = document.getElementById('verificationBadges');
+  const verificationDetails = document.getElementById('verificationDetails');
+  const authScoreCard = document.getElementById('authScoreCard');
+  const stopBanner = document.getElementById('stopBanner');
+  const reasonsBlock = document.getElementById('reasonsBlock');
+
+  document.getElementById('pipelineStage').textContent = data.stage || '—';
+  const statusEl = document.getElementById('pipelineStatus');
+  statusEl.textContent = data.status || '—';
+  statusEl.className = `value status-${data.status || 'unknown'}`;
+
+  if (stopped) {
+    stopBanner.classList.remove('hidden');
+    stopBanner.textContent = `Stopped at ${data.stage}: ${data.reason || 'Processing stopped'}`;
+    verificationBadges.classList.add('hidden');
+    verificationDetails.classList.add('hidden');
+    authScoreCard.classList.add('hidden');
+  } else if (isExtraction) {
+    stopBanner.classList.add('hidden');
+    verificationBadges.classList.add('hidden');
+    verificationDetails.classList.add('hidden');
+    authScoreCard.classList.add('hidden');
+  } else {
+    stopBanner.classList.add('hidden');
+    verificationBadges.classList.remove('hidden');
+    verificationDetails.classList.remove('hidden');
+    authScoreCard.classList.remove('hidden');
+    setBadge(document.getElementById('validationBadge'), data.validation?.passed, 'Validation');
+    setBadge(document.getElementById('authenticityBadge'), data.authenticity?.passed, 'Authenticity');
+    setBadge(document.getElementById('overallBadge'), data.overallPassed, 'Overall');
+  }
+
+  const reasons = data.reasons || data.classification?.reasons || [];
+  if (reasons.length) {
+    reasonsBlock.classList.remove('hidden');
+    fillList('reasonsList', reasons, 'No reasons');
+  } else {
+    reasonsBlock.classList.add('hidden');
+  }
 
   document.getElementById('docType').textContent = data.documentType || '—';
   document.getElementById('authScore').textContent =
     data.authenticity?.score != null ? `${data.authenticity.score}/100` : '—';
+  document.getElementById('endpointUsed').textContent = lastEndpoint || '—';
   document.getElementById('ocrConf').textContent =
     data.ocrConfidence != null ? `${data.ocrConfidence}%` : '—';
+  document.getElementById('classConf').textContent =
+    data.classificationConfidence != null ? `${data.classificationConfidence}` : '—';
   document.getElementById('extractConf').textContent =
     data.extractionConfidence != null ? `${data.extractionConfidence}%` : '—';
 
@@ -112,30 +217,57 @@ function renderResults(data) {
   const tbody = document.querySelector('#fieldsTable tbody');
   tbody.innerHTML = '';
   const fields = data.data || {};
-  for (const [key, val] of Object.entries(fields)) {
+  const keys = Object.keys(fields).filter((k) => k !== 'fullOcrText');
+  keys.sort((a, b) => {
+    const ag = GENERIC_KEYS.has(a) ? 1 : 0;
+    const bg = GENERIC_KEYS.has(b) ? 1 : 0;
+    return ag - bg || a.localeCompare(b);
+  });
+
+  for (const key of keys) {
+    const val = fields[key];
+    if (val == null || val === '' || (Array.isArray(val) && val.length === 0)) continue;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${formatLabel(key)}</td><td>${val || '—'}</td>`;
+    const display = formatValue(val);
+    const cellClass = display.includes('\n') ? 'pre-cell' : '';
+    tr.innerHTML = `<td>${formatLabel(key)}</td><td class="${cellClass}"><pre class="field-pre">${escapeHtml(display)}</pre></td>`;
     tbody.appendChild(tr);
   }
 
-  renderGrid('categoryScores', data.categoryScores || {}, (v) => v.toFixed(1));
+  document.getElementById('ocrText').textContent =
+    data.fullOcrText || data.data?.fullOcrText || '(no OCR text)';
+
+  if (!isExtraction && !stopped) {
+    renderGrid('categoryScores', data.categoryScores || {}, (v) =>
+      typeof v === 'number' ? v.toFixed(1) : String(v)
+    );
+    fillList('fraudList', data.fraudIndicators || [], 'No fraud indicators detected');
+    fillList('qualityList', data.qualityWarnings || [], 'No quality warnings');
+
+    const detEl = document.getElementById('detectorResults');
+    detEl.innerHTML = '';
+    (data.detectorResults || []).forEach((d) => {
+      const div = document.createElement('div');
+      div.className = 'detector-item';
+      div.innerHTML = `
+        <span>${d.name} (score: ${d.score}, weight: ${d.weight})</span>
+        <span class="status ${d.passed ? 'pass' : 'fail'}">${d.passed ? 'PASS' : 'FAIL'}</span>
+      `;
+      detEl.appendChild(div);
+    });
+  } else if (stopped && data.qualityWarnings?.length) {
+    fillList('qualityList', data.qualityWarnings, 'No quality warnings');
+  }
+
   renderGrid('imageQuality', flattenQuality(data.imageQuality), (v) => String(v));
   renderGrid('timings', data.timings || {}, (v) => `${v}ms`);
+}
 
-  fillList('fraudList', data.fraudIndicators || [], 'No fraud indicators detected');
-  fillList('qualityList', data.qualityWarnings || [], 'No quality warnings');
-
-  const detEl = document.getElementById('detectorResults');
-  detEl.innerHTML = '';
-  (data.detectorResults || []).forEach((d) => {
-    const div = document.createElement('div');
-    div.className = 'detector-item';
-    div.innerHTML = `
-      <span>${d.name} (score: ${d.score}, weight: ${d.weight})</span>
-      <span class="status ${d.passed ? 'pass' : 'fail'}">${d.passed ? 'PASS' : 'FAIL'}</span>
-    `;
-    detEl.appendChild(div);
-  });
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function fillList(elId, items, emptyText) {
@@ -176,11 +308,15 @@ function flattenQuality(iq) {
 
 function renderGrid(elId, obj, formatter) {
   const el = document.getElementById(elId);
+  if (!el) return;
   el.innerHTML = '';
   for (const [key, val] of Object.entries(obj)) {
+    if (val == null) continue;
     const div = document.createElement('div');
     div.className = elId === 'timings' ? 'time-item' : elId === 'imageQuality' ? 'iq-item' : 'cat-item';
     div.innerHTML = `<span>${formatLabel(key)}</span>${formatter(val)}`;
     el.appendChild(div);
   }
 }
+
+loadDocumentTypes();

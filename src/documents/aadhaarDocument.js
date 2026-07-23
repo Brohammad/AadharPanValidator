@@ -6,33 +6,70 @@ const MANDATORY_FIELDS = ['name', 'aadhaar'];
 
 class AadhaarDocument extends BaseDocument {
   constructor() {
-    super('AADHAAR', 'Aadhaar Card');
+    super('AADHAAR', 'Aadhaar Card', { mode: 'verification' });
   }
 
   identify(features) {
     let score = 0;
-    const { signals, upperText, text } = features;
+    const reasons = [];
+    const signals = {};
+    const { signals: feat, upperText, text } = features;
 
-    if (signals.hasAadhaarLabel || /AADHA+R|आधार|AADHAR/i.test(text)) score += 30;
-    if (signals.hasUidai || /UIDAI|UNIQUE\s*ID/i.test(text)) score += 25;
-    if (signals.hasGovernmentOfIndia) score += 20;
+    // Hard negative: this is clearly another ID type
+    if (
+      /\bPASSPORT\b|P<[A-Z]{3}|SURNAME|GIVEN\s*NAME|DATE\s*OF\s*EXPIRY|<{3,}/i.test(text) ||
+      /\bPERMANENT\s*ACCOUNT|\bPAN\b|INCOME\s*TAX/i.test(text)
+    ) {
+      reasons.push('Strong non-Aadhaar document signals (passport/PAN) — rejecting Aadhaar match');
+      signals.wrongDocType = true;
+      return { score: 0, reasons, signals };
+    }
+
+    if (feat.hasAadhaarLabel || /AADHA+R|आधार|AADHAR/i.test(text)) {
+      score += 30;
+      reasons.push('Matched Aadhaar / आधार keyword');
+      signals.aadhaarKeyword = true;
+    }
+    if (feat.hasUidai || /UIDAI|UNIQUE\s*ID/i.test(text)) {
+      score += 25;
+      reasons.push('Matched UIDAI / Unique ID');
+      signals.uidai = true;
+    }
+    if (feat.hasGovernmentOfIndia) {
+      score += 20;
+      reasons.push('Matched Government of India');
+      signals.goi = true;
+    }
 
     const numbers = extractAadhaarNumbers(text);
     const valid = numbers.find((n) => validateAadhaar(n).valid);
-    if (valid) score += 45;
-    else if (numbers.length > 0) score += 30;
-    else if (/\d[\d\s]{10,14}\d/.test(text)) {
-      const digits = text.replace(/\D/g, '');
-      if (digits.length >= 12) score += 20;
+    if (valid) {
+      score += 45;
+      reasons.push('Valid Aadhaar number pattern + Verhoeff checksum');
+      signals.validAadhaar = true;
+    } else if (numbers.length > 0 && (signals.aadhaarKeyword || signals.uidai)) {
+      score += 20;
+      reasons.push('12-digit candidate near Aadhaar keywords');
+      signals.aadhaarCandidate = true;
     }
 
-    if (/DOB|DATE\s*OF\s*BIRTH|YOB|\d{2}[\/\-.]\d{2}[\/\-.]\d{4}/i.test(text)) score += 10;
-    if (/MALE|FEMALE|TRANSGENDER/i.test(upperText)) score += 5;
-    if (signals.hasQrLikeRegion) score += 5;
+    if (/DOB|DATE\s*OF\s*BIRTH|YOB|\d{2}[\/\-.]\d{2}[\/\-.]\d{4}/i.test(text)) {
+      score += 10;
+      reasons.push('Matched DOB / YOB field');
+    }
+    if (/MALE|FEMALE|TRANSGENDER/i.test(upperText)) {
+      score += 5;
+      reasons.push('Matched gender token');
+    }
+    if (feat.hasQrLikeRegion) {
+      score += 5;
+      reasons.push('QR-like region detected');
+      signals.qrLike = true;
+    }
 
     if (valid && score < 40) score = 40;
 
-    return Math.min(score, 100);
+    return { score: Math.min(score, 100), reasons, signals };
   }
 
   extract(ocr) {
@@ -51,8 +88,10 @@ class AadhaarDocument extends BaseDocument {
     const aadhaarCandidates = extractAadhaarNumbers(text);
     const valid = aadhaarCandidates.find((n) => validateAadhaar(n).valid);
     if (valid) data.aadhaar = valid;
-    else if (aadhaarCandidates.length > 0) data.aadhaar = aadhaarCandidates[0];
-    else issues.push('Aadhaar number not found');
+    else {
+      // Never invent Aadhaar from arbitrary 12-digit runs (e.g. passport MRZ)
+      issues.push('Aadhaar number not found');
+    }
 
     data.name = extractPersonName(text, { words, preferLabeled: true });
     if (!data.name) issues.push('Name not found');
@@ -101,6 +140,23 @@ class AadhaarDocument extends BaseDocument {
       reason: result.valid ? null : result.reason,
       normalized: result.normalized,
     };
+  }
+
+  normalizeData(data, validationResult) {
+    if (validationResult?.normalized) {
+      return { ...data, aadhaar: validationResult.normalized };
+    }
+    return data;
+  }
+
+  authenticityChecks() {
+    return [
+      'checksumValidator',
+      'layoutDetector',
+      'logoDetector',
+      'ocrQualityDetector',
+      'screenshotDetector',
+    ];
   }
 }
 

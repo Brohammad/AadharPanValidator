@@ -66,6 +66,9 @@ function scoreOcrResult(result) {
 
   if (/[A-Z]{5}[0-9OISB]{4}[A-Z]/.test(upper)) score += 80;
   if (/\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b/.test(text)) score += 80;
+  if (/\bP<[A-Z]{3}|PASSPORT|REPUBLIC\s+OF|<<<</i.test(text)) score += 70;
+  if (/\b[A-Z]\d{7}\b/.test(upper)) score += 50;
+  if (/SURNAME|GIVEN\s*NAME|PLACE\s*OF\s*BIRTH|NATIONALITY/i.test(text)) score += 25;
   if (/INCOME\s*TAX|GOVT\.?\s*OF\s*INDIA|GOVERNMENT\s*OF\s*INDIA|आयकर|भारत\s*सरकार/i.test(text)) {
     score += 40;
   }
@@ -123,8 +126,25 @@ async function runOcrModes(imageBuffer, modes) {
   return { result: best, score: bestScore };
 }
 
-async function runOcr(imageBuffer) {
-  const primary = await runOcrModes(imageBuffer, PSM_PRIMARY);
+async function runOcr(imageBuffer, options = {}) {
+  const modes = options.fast
+    ? [{ name: 'single_block', tessedit_pageseg_mode: '6' }]
+    : PSM_PRIMARY;
+
+  const primary = await runOcrModes(imageBuffer, modes);
+  if (options.fast) {
+    return (
+      primary.result || {
+        text: '',
+        ocrConfidence: 0,
+        words: [],
+        blocks: [],
+        lines: [],
+        raw: {},
+      }
+    );
+  }
+
   if (primary.score >= GOOD_ENOUGH_SCORE) {
     return primary.result;
   }
@@ -143,27 +163,34 @@ async function runOcr(imageBuffer) {
   );
 }
 
-async function runOcrOnPages(ocrBuffers, ocrVariantsList = null) {
+async function runOcrOnPages(ocrBuffers, ocrVariantsList = null, options = {}) {
   const pageResults = [];
+  const maxVariants = options.maxVariants || Infinity;
+  const fast = Boolean(options.fast);
+  const goodEnough = options.goodEnoughScore ?? GOOD_ENOUGH_SCORE;
+  const excellent = options.excellentScore ?? EXCELLENT_SCORE;
 
   for (let i = 0; i < ocrBuffers.length; i++) {
-    const variants =
+    const variants = (
       ocrVariantsList && ocrVariantsList[i] && ocrVariantsList[i].length
         ? ocrVariantsList[i]
-        : [ocrBuffers[i]];
+        : [ocrBuffers[i]]
+    ).slice(0, maxVariants);
 
     let best = null;
     let bestScore = -Infinity;
 
     for (const variant of variants) {
-      const result = await runOcr(variant);
+      const result = await runOcr(variant, { fast });
       const score = scoreOcrResult(result);
       if (score > bestScore) {
         bestScore = score;
         best = result;
       }
-      if (score >= EXCELLENT_SCORE) break;
-      if (score >= GOOD_ENOUGH_SCORE && best?.ocrConfidence >= 55) break;
+      if (score >= excellent) break;
+      if (score >= goodEnough && best?.ocrConfidence >= 55) break;
+      // Fast path: accept first decent read
+      if (fast && best?.ocrConfidence >= 60 && (best.text || '').trim().length > 40) break;
     }
 
     pageResults.push(
@@ -197,6 +224,12 @@ async function terminateOcr() {
     // ignore
   }
   schedulerPromise = null;
+  try {
+    const { terminatePassportOcr } = require('./passportOcr');
+    await terminatePassportOcr();
+  } catch {
+    // ignore
+  }
 }
 
 module.exports = {
