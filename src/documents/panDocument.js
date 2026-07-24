@@ -6,42 +6,22 @@ const {
   extractDob,
 } = require('./fieldExtractors');
 const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
-const { refinePanOcr } = require('../ocr/panOcr');
 
 const MANDATORY_FIELDS = ['name', 'pan'];
 const OPTIONAL_FIELDS = ['fatherName', 'dob'];
 
 /** Fuzzy OCR helpers for hard CamScanner / low-contrast photos */
 function fuzzyHasIncomeTax(text) {
-  return /INCOME\s*TAX|आयकर|INC[O0]ME|1NC[O0]ME|INCOME\s*T[A4]X|DEFART|DEPARTMENT/i.test(
-    text
-  );
+  return /INCOME\s*TAX|आयकर|INC[O0]ME|1NC[O0]ME|INCOME\s*T[A4]X/i.test(text);
 }
 
 function fuzzyHasPanLabel(text) {
-  return /\bPAN\b|PERMANENT\s*ACCOUNT|P[A4]N\b|PERM[A4]NENT|PEMANENTACCOUNT|ACCOUNTNUMBER/i.test(
-    text
-  );
-}
-
-/** Split mashed OCR tokens like FathersNameANZARIBRAHM */
-function expandMashedPanText(text) {
-  return String(text || '')
-    .replace(/FATHERS?NAME/gi, "Father's Name ")
-    .replace(/PEMANENTACCOUNT|PERMANENTACCOUNT/gi, 'Permanent Account ')
-    .replace(/ACCOUNTNUMBER/gi, 'Account Number ')
-    .replace(/DATEOFBIRTH/gi, 'Date of Birth ')
-    .replace(/GOVTOFINDIA/gi, 'GOVT OF INDIA ')
-    .replace(/INCOMETAXDEPARTMENT/gi, 'INCOME TAX DEPARTMENT ');
+  return /\bPAN\b|PERMANENT\s*ACCOUNT|P[A4]N\b|PERM[A4]NENT/i.test(text);
 }
 
 class PanDocument extends BaseDocument {
   constructor() {
     super('PAN', 'PAN Card', { mode: 'verification' });
-  }
-
-  async refineOcr(ocrResult, page) {
-    return refinePanOcr(ocrResult, page);
   }
 
   identify(features) {
@@ -106,8 +86,7 @@ class PanDocument extends BaseDocument {
   }
 
   extract(ocr) {
-    const rawText = ocr.text || '';
-    const text = expandMashedPanText(rawText);
+    const text = ocr.text || '';
     const words = ocr.words || ocr.pages?.[0]?.words || [];
     const issues = [];
     const data = {
@@ -117,52 +96,12 @@ class PanDocument extends BaseDocument {
       pan: null,
     };
 
-    // Prefer PAN recovered from dark-ink refine strip over garbage full-page OCR
-    const inkChunks = rawText
-      .split(/\n+/)
-      .filter((l) => /PANINK|PANLINE/i.test(l));
-    const inkText = inkChunks.join('\n');
-    const inkPans = inkText ? extractPanNumbers(inkText) : [];
-
-    // Full-page: only accept exact AAAAA9999A tokens near PAN card cues
-    const contextualPans = [];
-    const upper = text.toUpperCase();
-    for (const match of upper.match(/\b[A-Z]{5}[0-9]{4}[A-Z]\b/g) || []) {
-      const idx = upper.indexOf(match);
-      const window = upper.slice(Math.max(0, idx - 100), idx + match.length + 100);
-      if (/PERMANENT|PEMANENT|ACCOUNT\s*NUMBER|PANINK|PAN\s*CARD/i.test(window)) {
-        contextualPans.push(match);
-      }
-    }
-
-    if (inkPans.length > 0) data.pan = inkPans[0];
-    else if (contextualPans.length > 0) data.pan = contextualPans[0];
+    const panCandidates = extractPanNumbers(text);
+    if (panCandidates.length > 0) data.pan = panCandidates[0];
     else issues.push('PAN number not found');
 
     // Extract father first so we can exclude it from person name
     data.fatherName = extractFatherName(text, { words });
-    if (!data.fatherName) {
-      const mashed = String(rawText || '').match(
-        /FATHERS?NAME\s*([A-Z]{4,}(?:\s+[A-Z]{2,}){0,3}|[A-Z]{8,})/i
-      );
-      if (mashed) {
-        let father = mashed[1].trim();
-        father = father
-          .replace(/^(ANZAR)(IBRAHIM|IBRAHM)$/i, 'ANZAR IBRAHIM')
-          .replace(/IBRAHM$/i, 'IBRAHIM');
-        if (!/\s/.test(father) && father.length >= 10) {
-          father = father.replace(/^(ANZAR)(.+)$/i, 'ANZAR $2');
-        }
-        data.fatherName = father.replace(/\s+/g, ' ').trim();
-      }
-    }
-    // OCR often returns "ANZAR IBRA|" without the Father label
-    if (!data.fatherName) {
-      const loose = String(rawText || '').match(/\b(ANZAR)\s*(IBRA[HM]+)\b/i);
-      if (loose) {
-        data.fatherName = `ANZAR ${loose[2].replace(/IBRAHM$/i, 'IBRAHIM')}`;
-      }
-    }
     data.name = extractPersonName(text, {
       words,
       preferLabeled: true,

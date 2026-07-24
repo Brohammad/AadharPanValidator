@@ -49,53 +49,24 @@ async function toOcrVariantsPdf(buffer, { maxVariants = 1 } = {}) {
   return [sized].slice(0, maxVariants);
 }
 
-/** Stronger PAN blue-card variants (photo-in-PDF is often dark blue). */
+/** PAN blue-card invert variant for embedded/PDF */
 async function toPanInvertVariant(buffer) {
-  const width = config.ocrResizeWidthPhoto || 1800;
   return sharp(buffer)
-    .resize({ width, withoutEnlargement: false, kernel: sharp.kernel.lanczos3 })
-    .modulate({ brightness: 1.35, saturation: 0.1 })
+    .resize({
+      width: config.ocrResizeWidthPdf,
+      withoutEnlargement: true,
+    })
+    .modulate({ brightness: 1.25, saturation: 0.15 })
     .greyscale()
     .negate()
     .normalize()
-    .linear(1.4, -40)
-    .sharpen({ sigma: 1.2 })
+    .sharpen()
     .png()
     .toBuffer();
-}
-
-/** Extra PAN variants: blue-channel negate + high-contrast greyscale */
-async function toPanOcrVariants(buffer, { maxVariants = 3 } = {}) {
-  const width = config.ocrResizeWidthPhoto || 1800;
-  const sized = await sharp(buffer)
-    .resize({ width, withoutEnlargement: false, kernel: sharp.kernel.lanczos3 })
-    .toBuffer();
-
-  const [inverted, blueNeg, contrast] = await Promise.all([
-    toPanInvertVariant(sized),
-    sharp(sized)
-      .extractChannel(2)
-      .normalize()
-      .negate()
-      .normalize()
-      .sharpen({ sigma: 1.0 })
-      .png()
-      .toBuffer(),
-    sharp(sized)
-      .greyscale()
-      .normalize()
-      .linear(1.8, -80)
-      .sharpen()
-      .png()
-      .toBuffer(),
-  ]);
-
-  return [inverted, blueNeg, contrast].slice(0, maxVariants);
 }
 
 module.exports = {
   toOcrVariantsPhoto,
   toOcrVariantsPdf,
   toPanInvertVariant,
-  toPanOcrVariants,
 };

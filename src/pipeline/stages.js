@@ -3,7 +3,7 @@
  */
 const { prepareImages } = require('../preprocessing/pdf');
 const { analyzeImageQuality } = require('../preprocessing/quality');
-const { preprocessChain, rebuildPageAtAngle, isIdCardType } = require('../preprocessing/chain');
+const { preprocessChain, rebuildPageAtAngle } = require('../preprocessing/chain');
 const { runOcrOnPages, scoreOcrResult } = require('../ocr/tesseract');
 const { extractFeatures } = require('../features/extractFeatures');
 const { evaluateOcrQuality } = require('./ocrQuality');
@@ -14,16 +14,8 @@ const { runRuleEngine } = require('../rules/engine');
 const { aggregateScores, buildDecision } = require('../rules/aggregator');
 const config = require('../config');
 
-function hasIdOcrCues(text) {
-  const upper = String(text || '').toUpperCase();
-  return /INCOME|TAX|GOVT|FATHER|PEMANENT|PERMANENT|ACCOUNT|AADHAAR|AADHAR|UIDAI|DOB|[A-Z]{5}[0-9OISB]{4}[A-Z]|\d{4}[\s\-]?\d{4}[\s\-]?\d{4}/i.test(
-    upper
-  );
-}
-
 function ocrLooksWeak(ocrResult) {
   const text = String(ocrResult?.text || '');
-  if (hasIdOcrCues(text)) return false;
   const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
   const score = scoreOcrResult(ocrResult || { text: '', ocrConfidence: 0 });
   return alnum < 40 || score < 50 || (ocrResult?.ocrConfidence || 0) < 45;
@@ -43,16 +35,13 @@ async function stagePreparePages(filePath, requestId) {
 }
 
 async function stagePreprocess(images, { source, documentType, maxVariants = 1 }) {
-  const idCard = isIdCardType(documentType);
-  const variants = source === 'image' || idCard ? Math.max(maxVariants, 2) : maxVariants;
-
   const processedPages = [];
   for (const img of images) {
     processedPages.push(
       await preprocessChain(img, {
         source,
         documentType,
-        maxVariants: variants,
+        maxVariants: source === 'image' ? Math.max(maxVariants, 1) : maxVariants,
       })
     );
   }
@@ -74,50 +63,6 @@ async function stageOcr(processedPages, options = {}) {
   );
 }
 
-/**
- * OCR each page separately and keep the best-scoring page confidence,
- * while merging page texts (helps 2-sided Aadhaar PDFs).
- */
-async function stageOcrBestPage(processedPages, options = {}) {
-  if (processedPages.length <= 1) {
-    return stageOcr(processedPages, {
-      ...options,
-      maxVariants: options.maxVariants || 2,
-    });
-  }
-
-  let best = null;
-  let bestScore = -Infinity;
-  const pageTexts = [];
-
-  for (const page of processedPages) {
-    const result = await runOcrOnPages(
-      [page.ocrBuffer],
-      [(page.ocrVariants || [page.ocrBuffer]).slice(0, options.maxVariants || 2)],
-      {
-        fast: options.fast !== false,
-        maxVariants: options.maxVariants || 2,
-        goodEnoughScore: options.goodEnoughScore ?? config.ocrFastGoodEnoughScore,
-      }
-    );
-    const score = scoreOcrResult(result);
-    pageTexts.push(result.text || '');
-    if (score > bestScore) {
-      bestScore = score;
-      best = result;
-    }
-  }
-
-  if (!best) return stageOcr(processedPages, options);
-
-  const merged = [...new Set(pageTexts.filter(Boolean))].join('\n\n');
-  return {
-    ...best,
-    text: merged || best.text,
-    pages: processedPages.map((_, i) => ({ text: pageTexts[i] })),
-  };
-}
-
 async function stageRetryOrientationIfNeeded(processedPages, ocrResult, source, imageQuality, documentType) {
   if (source !== 'embedded' && source !== 'pdf') {
     return { processedPages, ocrResult, imageQuality };
@@ -132,89 +77,29 @@ async function stageRetryOrientationIfNeeded(processedPages, ocrResult, source, 
   const page = await rebuildPageAtAngle(processedPages[0].originalBuffer, alternate, {
     source,
     documentType,
-    maxVariants: isIdCardType(documentType) ? 2 : 1,
+    maxVariants: 1,
   });
   const nextOcr = await runOcrOnPages(
     [page.ocrBuffer],
-    [page.ocrVariants.slice(0, 2)],
+    [page.ocrVariants.slice(0, 1)],
     {
       fast: true,
-      maxVariants: 2,
+      maxVariants: 1,
       goodEnoughScore: config.ocrFastGoodEnoughScore,
     }
   );
+  const nextScore = scoreOcrResult(nextOcr);
+  const curScore = scoreOcrResult(ocrResult);
 
-  if (scoreOcrResult(nextOcr) > scoreOcrResult(ocrResult)) {
+  if (nextScore > curScore) {
     return {
-      processedPages: [page, ...processedPages.slice(1)],
+      processedPages: [page],
       ocrResult: nextOcr,
       imageQuality: await analyzeImageQuality(page.processedBuffer),
     };
   }
 
   return { processedPages, ocrResult, imageQuality };
-}
-
-/**
- * Escalation for weak ID-card OCR (photo-in-PDF Aadhaar/PAN):
- * try upright angles + photo variants + slower PSM, keep the best score.
- */
-async function stageEscalateIdCardOcr(processedPages, ocrResult, source, imageQuality, documentType) {
-  if (!isIdCardType(documentType)) {
-    return { processedPages, ocrResult, imageQuality, escalated: false };
-  }
-  const currentScore = scoreOcrResult(ocrResult);
-  // Skip when already readable or ID cues present (avoid 60s+ angle thrash)
-  if (
-    hasIdOcrCues(ocrResult?.text) ||
-    currentScore >= 70 ||
-    (!ocrLooksWeak(ocrResult) && (ocrResult?.ocrConfidence || 0) >= config.ocrConfidenceThreshold)
-  ) {
-    return { processedPages, ocrResult, imageQuality, escalated: false };
-  }
-
-  const currentAngle = processedPages[0]?.orientationAngle || 0;
-  // Only try the two most likely alternates (skip current)
-  const angles = [270, 90, 0, 180].filter((a) => a !== currentAngle).slice(0, 2);
-  let best = {
-    processedPages,
-    ocrResult,
-    imageQuality,
-    score: currentScore,
-  };
-
-  const primary = processedPages[0];
-  for (const angle of angles) {
-    const page = await rebuildPageAtAngle(primary.originalBuffer, angle, {
-      source: source || 'embedded',
-      documentType,
-      maxVariants: 2,
-    });
-    const nextOcr = await runOcrOnPages(
-      [page.ocrBuffer],
-      [page.ocrVariants.slice(0, 2)],
-      {
-        fast: true,
-        maxVariants: 2,
-        goodEnoughScore: config.ocrFastGoodEnoughScore,
-      }
-    );
-    const score = scoreOcrResult(nextOcr);
-    const nextAlnum = ((nextOcr.text || '').match(/[A-Za-z0-9]/g) || []).length;
-    if (nextAlnum < 12) continue;
-
-    if (score > best.score + 5) {
-      best = {
-        processedPages: [page, ...processedPages.slice(1)],
-        ocrResult: nextOcr,
-        imageQuality: await analyzeImageQuality(page.processedBuffer),
-        score,
-      };
-    }
-    if (best.score >= 70) break;
-  }
-
-  return { ...best, escalated: true };
 }
 
 function stageOcrQuality(ocrResult, imageQuality) {
@@ -235,6 +120,7 @@ function stageExtract(document, ocrResult, features) {
   const extraction = document.extract(ocrResult, features);
   let data = mergeWithGenerics(extraction.data, ocrResult, features);
 
+  // Prefer plugin-provided reasons; otherwise score centrally when fields declared
   let extractionConfidence = extraction.extractionConfidence;
   let extractionReasons = extraction.extractionReasons || [];
   let extractionIssues = extraction.extractionIssues || [];
@@ -262,6 +148,17 @@ function stageExtract(document, ocrResult, features) {
     extractionIssues = scored.extractionIssues;
     extractionBelowThreshold = scored.extractionBelowThreshold;
   } else if (!extractionReasons.length) {
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocrResult.ocrConfidence,
+      mandatoryFields: [],
+      optionalFields: [],
+      data: extraction.data,
+      issues: extractionIssues,
+      mandatoryWeight: 0,
+      optionalWeight: 0,
+      ocrWeight: 0,
+    });
+    // Keep plugin score but attach threshold reason if needed
     extractionBelowThreshold = extractionConfidence < config.extractionThreshold;
     if (extractionBelowThreshold) {
       extractionReasons = [
@@ -281,6 +178,7 @@ function stageExtract(document, ocrResult, features) {
         stage: 'extraction',
       });
     }
+    void scored;
   }
 
   return {
@@ -305,7 +203,10 @@ function stageValidate(document, data) {
       stage: 'validation',
     });
   }
-  return { ...result, reasons };
+  return {
+    ...result,
+    reasons,
+  };
 }
 
 async function stageRiskAssess(document, ctx) {
@@ -343,9 +244,7 @@ module.exports = {
   stagePreparePages,
   stagePreprocess,
   stageOcr,
-  stageOcrBestPage,
   stageRetryOrientationIfNeeded,
-  stageEscalateIdCardOcr,
   stageOcrQuality,
   stageClassify,
   stageExtract,

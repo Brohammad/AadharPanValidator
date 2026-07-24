@@ -33,7 +33,6 @@ function validatePan(number) {
 function extractPanNumbers(text) {
   const upper = text.toUpperCase();
   const candidates = [];
-  const scored = [];
 
   // Exact PAN pattern
   for (const match of upper.match(/\b[A-Z]{5}[0-9]{4}[A-Z]\b/g) || []) {
@@ -74,82 +73,6 @@ function extractPanNumbers(text) {
   for (const match of upper.match(/\b[A-Z0]{5}[0-9]{4}[A-Z]\b/g) || []) {
     const normalized = normalizePan(match);
     if (PAN_PATTERN.test(normalized)) candidates.push(normalized);
-  }
-
-  // Dark-ink / noisy strip: prefer 10-char windows needing few substitutions,
-  // especially near PANINK marker or with 4th-char entity type P/C/H/F/A/T.
-  const digitMap = { O: '0', I: '1', L: '1', Z: '2', S: '5', B: '8', G: '6', E: '6' };
-  const preferNoise =
-    /PANINK|PANLINE|PERMANENT|ACCOUNT\s*NUMBER|PEMANENT/i.test(text)
-      ? upper
-      : '';
-  const noiseSources = preferNoise
-    ? [preferNoise, upper]
-    : [upper];
-
-  for (const src of noiseSources) {
-    const compact = src.replace(/[^A-Z0-9]/g, '');
-    for (let i = 0; i <= compact.length - 10; i++) {
-      const windows = [compact.slice(i, i + 10)];
-      if (i + 11 <= compact.length) {
-        const eleven = compact.slice(i, i + 11);
-        // Drop one mid char (OCR insert) to form a 10-char PAN window
-        for (let drop = 5; drop <= 9; drop++) {
-          windows.push(eleven.slice(0, drop) + eleven.slice(drop + 1));
-        }
-      }
-
-      for (const slice of windows) {
-        if (slice.length !== 10) continue;
-        if (!/^[A-Z]{5}/.test(slice) || !/[A-Z]$/.test(slice)) continue;
-        const entity = slice[3];
-        if (!/[PCHFATBLJG]/.test(entity)) continue;
-
-        let subs = 0;
-        let digits = '';
-        let ok = true;
-        for (let j = 5; j <= 8; j++) {
-          const ch = slice[j];
-          if (/[0-9]/.test(ch)) {
-            digits += ch;
-          } else if (digitMap[ch]) {
-            digits += digitMap[ch];
-            subs += 1;
-          } else {
-            ok = false;
-            break;
-          }
-        }
-        if (!ok || digits.length !== 4) continue;
-        const realDigits = slice.slice(5, 9).replace(/[^0-9]/g, '').length;
-        // Allow 1 real digit for PANINK strips (security pattern eats digits)
-        const minReal = /PANINK|PANLINE/.test(src) ? 1 : 2;
-        if (realDigits < minReal) continue;
-
-        const candidate = normalizePan(slice.slice(0, 5) + digits + slice[9]);
-        if (!PAN_PATTERN.test(candidate)) continue;
-
-        let score = 40 - subs * 8 + realDigits * 5;
-        if (entity === 'P') score += 15;
-        if (/PANINK|PANLINE/.test(src)) score += 20;
-        // Prefer check digit that isn't an OCR digit-confusion letter
-        if (!digitMap[slice[9]]) score += 10;
-        // Prefer letter-prefix + trailing digits in the mid quartet (e.g. BE35)
-        if (/^[A-Z]{0,2}[0-9]{2,4}$/.test(slice.slice(5, 9))) score += 15;
-        scored.push({ pan: candidate, score, subs });
-      }
-    }
-    if (scored.some((s) => s.score >= 70)) break;
-  }
-
-  scored.sort((a, b) => b.score - a.score || a.subs - b.subs);
-  // Prefer a single best noisy candidate (avoid flooding with near-misses)
-  if (scored.length && scored[0].score >= 40) {
-    candidates.push(scored[0].pan);
-    // Include runner-up only if clearly competitive and different
-    if (scored[1] && scored[1].score >= scored[0].score - 5 && scored[1].pan !== scored[0].pan) {
-      candidates.push(scored[1].pan);
-    }
   }
 
   return [...new Set(candidates)];

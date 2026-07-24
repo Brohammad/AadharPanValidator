@@ -9,7 +9,7 @@ const {
   denoise,
   invertForOcr,
 } = require('./normalize');
-const { toOcrVariantsPhoto, toOcrVariantsPdf, toPanInvertVariant, toPanOcrVariants } = require('./variants');
+const { toOcrVariantsPhoto, toOcrVariantsPdf, toPanInvertVariant } = require('./variants');
 
 /**
  * Profile → ordered stage names for documentation / debugging.
@@ -36,5 +36,4 @@ module.exports = {
   toOcrVariantsPhoto,
   toOcrVariantsPdf,
   toPanInvertVariant,
-  toPanOcrVariants,
 };

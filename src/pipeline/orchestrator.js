@@ -8,16 +8,13 @@ const {
   stagePreparePages,
   stagePreprocess,
   stageOcr,
-  stageOcrBestPage,
   stageRetryOrientationIfNeeded,
-  stageEscalateIdCardOcr,
   stageOcrQuality,
   stageClassify,
   stageExtract,
   stageValidate,
   stageRiskAssess,
 } = require('./stages');
-const { isIdCardType } = require('../preprocessing/chain');
 const config = require('../config');
 
 /**
@@ -63,64 +60,35 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
     const { processedPages: pages0, imageQuality: iq0 } = await stagePreprocess(images, {
       source,
       documentType: document.type,
-      maxVariants: isIdCardType(document.type) ? 2 : 1,
+      maxVariants: 1,
     });
     let processedPages = pages0;
     let imageQuality = iq0;
     timings.end('preprocess');
     logStage({ durationMs: timings.toJSON().preprocess, source, status: 'ok' });
 
-    // --- OCR (+ optional orientation retry / ID-card escalation) ---
+    // --- OCR (+ optional orientation retry) ---
     stage = 'ocr';
     timings.start('ocr');
-    let ocrResult = isIdCardType(document.type)
-      ? await stageOcrBestPage(processedPages, { maxVariants: 2 })
-      : await stageOcr(processedPages);
+    let ocrResult = await stageOcr(processedPages);
 
-    // ID cards already got OCR orientation in preprocess — skip edge retry
-    if (!isIdCardType(document.type)) {
-      const retried = await stageRetryOrientationIfNeeded(
-        processedPages,
-        ocrResult,
-        source,
-        imageQuality,
-        document.type
-      );
-      processedPages = retried.processedPages;
-      ocrResult = retried.ocrResult;
-      imageQuality = retried.imageQuality;
-    }
-
-    const escalated = await stageEscalateIdCardOcr(
+    const retried = await stageRetryOrientationIfNeeded(
       processedPages,
       ocrResult,
       source,
       imageQuality,
       document.type
     );
-    processedPages = escalated.processedPages;
-    ocrResult = escalated.ocrResult;
-    imageQuality = escalated.imageQuality;
+    processedPages = retried.processedPages;
+    ocrResult = retried.ocrResult;
+    imageQuality = retried.imageQuality;
     timings.end('ocr');
-
-    // Refine before quality gate so PAN/Aadhaar ROI text can soft-pass
-    if (typeof document.refineOcr === 'function') {
-      timings.start('refineOcr');
-      try {
-        ocrResult = await document.refineOcr(ocrResult, processedPages[0]);
-      } catch (err) {
-        logger.warn({ requestId, err: err.message }, 'refineOcr failed; continuing with base OCR');
-      }
-      timings.end('refineOcr');
-    }
 
     // --- OCR Quality Gate ---
     const ocrQuality = stageOcrQuality(ocrResult, imageQuality);
     logStage({
       durationMs: timings.toJSON().ocr,
       ocrConfidence: ocrQuality.ocrConfidence,
-      escalated: Boolean(escalated.escalated),
-      softPassed: Boolean(ocrQuality.softPassed),
       status: ocrQuality.passed ? 'ok' : 'stopped',
       stopReason: ocrQuality.passed ? undefined : 'OCR quality below configured threshold',
     });
@@ -140,6 +108,17 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
       });
       logStage({ stopReason: stopped.stopReason, status: 'stopped' });
       return stopped;
+    }
+
+    // Optional document-specific OCR refine (e.g. passport ROIs)
+    if (typeof document.refineOcr === 'function') {
+      timings.start('refineOcr');
+      try {
+        ocrResult = await document.refineOcr(ocrResult, processedPages[0]);
+      } catch (err) {
+        logger.warn({ requestId, err: err.message }, 'refineOcr failed; continuing with base OCR');
+      }
+      timings.end('refineOcr');
     }
 
     // --- Classification ---
