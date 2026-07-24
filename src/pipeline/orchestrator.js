@@ -1,78 +1,26 @@
 const Timings = require('../utils/timings');
 const logger = require('../logger');
 const { removeDir } = require('../utils/fileCleanup');
-const { prepareImages } = require('../preprocessing/pdf');
-const { analyzeImageQuality } = require('../preprocessing/quality');
-const { preprocessChain, rebuildPageAtAngle } = require('../preprocessing/chain');
-const { runOcrOnPages, scoreOcrResult } = require('../ocr/tesseract');
-const { extractFeatures } = require('../features/extractFeatures');
+const { buildStageLog } = require('../utils/safeLog');
 const { getDocumentByType, getDocumentBySlug } = require('../documents/registry');
-const { mergeWithGenerics } = require('../shared/genericExtract');
-const { runRuleEngine } = require('../rules/engine');
-const { aggregateScores, buildDecision } = require('../rules/aggregator');
-const { evaluateOcrQuality } = require('./ocrQuality');
-const { classifyDocument } = require('./classify');
 const { buildStoppedResponse, buildCompletedResponse } = require('./responseBuilder');
-
-function ocrLooksWeak(ocrResult) {
-  const text = String(ocrResult?.text || '');
-  const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
-  const score = scoreOcrResult(ocrResult || { text: '', ocrConfidence: 0 });
-  return alnum < 40 || score < 50 || (ocrResult?.ocrConfidence || 0) < 45;
-}
-
-/** Only retry rotation when OCR looks sideways/empty — not when upright but noisy. */
-function shouldRetryOrientation(ocrResult) {
-  const text = String(ocrResult?.text || '');
-  const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
-  const conf = ocrResult?.ocrConfidence || 0;
-  if (alnum < 40) return true;
-  if (conf < 20 && alnum < 80) return true;
-  return false;
-}
+const {
+  stagePreparePages,
+  stagePreprocess,
+  stageOcr,
+  stageRetryOrientationIfNeeded,
+  stageOcrQuality,
+  stageClassify,
+  stageExtract,
+  stageValidate,
+  stageRiskAssess,
+} = require('./stages');
+const config = require('../config');
 
 /**
- * If embedded/PDF OCR is weak, try ONE alternate orientation (cap latency).
- */
-async function retryOrientationIfNeeded(processedPages, ocrResult, source, imageQuality, documentType) {
-  if (source !== 'embedded' && source !== 'pdf') {
-    return { processedPages, ocrResult, imageQuality };
-  }
-  if (!shouldRetryOrientation(ocrResult)) {
-    return { processedPages, ocrResult, imageQuality };
-  }
-
-  const current = processedPages[0].orientationAngle || 0;
-  // Prefer the usual sideways fix first
-  const alternate = current === 270 ? 0 : 270;
-
-  const page = await rebuildPageAtAngle(processedPages[0].originalBuffer, alternate, {
-    source,
-    documentType,
-  });
-  const nextOcr = await runOcrOnPages(
-    [page.ocrBuffer],
-    [page.ocrVariants.slice(0, 1)],
-    { fast: true, maxVariants: 1, goodEnoughScore: 80 }
-  );
-  const nextScore = scoreOcrResult(nextOcr);
-  const curScore = scoreOcrResult(ocrResult);
-
-  if (nextScore > curScore) {
-    return {
-      processedPages: [page],
-      ocrResult: nextOcr,
-      imageQuality: await analyzeImageQuality(page.processedBuffer),
-    };
-  }
-
-  return { processedPages, ocrResult, imageQuality };
-}
-
-/**
- * Gated document pipeline (fast path):
- * preprocess (no OCR) → OCR → optional orientation retry → quality gate
- * → classify → extract → validate/auth (verification only)
+ * Gated document pipeline (standardized):
+ * prepare → preprocess → OCR → quality gate → classify → extract
+ * → validate (if supported) → risk (verification) → response
  */
 async function processDocument(filePath, filename, requestId, documentTypeOrSlug) {
   const document =
@@ -91,46 +39,40 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
   let stage = 'preprocess';
 
   const logStage = (extra = {}) => {
-    logger.info({
-      requestId,
-      filename,
-      requestedType: document.type,
-      stage,
-      ...extra,
-    });
+    logger.info(
+      buildStageLog({
+        requestId,
+        filename,
+        documentType: document.type,
+        stage,
+        ...extra,
+      })
+    );
   };
 
   try {
+    // --- PreparePages ---
     stage = 'preprocess';
     timings.start('preprocess');
-    const { images, tempDir: workDir, source } = await prepareImages(filePath, requestId);
+    const { images, tempDir: workDir, source } = await stagePreparePages(filePath, requestId);
     tempDir = workDir;
 
-    let processedPages = [];
-    for (const img of images) {
-      processedPages.push(
-        await preprocessChain(img, { source, documentType: document.type })
-      );
-    }
-
-    let imageQuality = await analyzeImageQuality(processedPages[0].processedBuffer);
+    const { processedPages: pages0, imageQuality: iq0 } = await stagePreprocess(images, {
+      source,
+      documentType: document.type,
+      maxVariants: 1,
+    });
+    let processedPages = pages0;
+    let imageQuality = iq0;
     timings.end('preprocess');
-    logStage({ durationMs: timings.toJSON().preprocess, source });
+    logStage({ durationMs: timings.toJSON().preprocess, source, status: 'ok' });
 
+    // --- OCR (+ optional orientation retry) ---
     stage = 'ocr';
     timings.start('ocr');
-    const ocrOptions = {
-      fast: true,
-      maxVariants: 1,
-      goodEnoughScore: 80,
-    };
-    let ocrResult = await runOcrOnPages(
-      processedPages.map((p) => p.ocrBuffer),
-      processedPages.map((p) => p.ocrVariants || [p.ocrBuffer]),
-      ocrOptions
-    );
+    let ocrResult = await stageOcr(processedPages);
 
-    const retried = await retryOrientationIfNeeded(
+    const retried = await stageRetryOrientationIfNeeded(
       processedPages,
       ocrResult,
       source,
@@ -142,13 +84,13 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
     imageQuality = retried.imageQuality;
     timings.end('ocr');
 
-    let ocrQuality = evaluateOcrQuality(ocrResult, imageQuality);
+    // --- OCR Quality Gate ---
+    const ocrQuality = stageOcrQuality(ocrResult, imageQuality);
     logStage({
       durationMs: timings.toJSON().ocr,
       ocrConfidence: ocrQuality.ocrConfidence,
-      ocrPassed: ocrQuality.passed,
-      alnumCount: ocrQuality.alnumCount,
-      orientationAngle: processedPages[0].orientationAngle,
+      status: ocrQuality.passed ? 'ok' : 'stopped',
+      stopReason: ocrQuality.passed ? undefined : 'OCR quality below configured threshold',
     });
 
     if (!ocrQuality.passed) {
@@ -162,12 +104,13 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
         fullOcrText: ocrQuality.fullOcrText,
         qualityWarnings: ocrQuality.warnings,
         orientationAngle: processedPages[0].orientationAngle,
+        mode: document.mode,
       });
-      logStage({ stopReason: stopped.reason, status: 'stopped' });
+      logStage({ stopReason: stopped.stopReason, status: 'stopped' });
       return stopped;
     }
 
-    // Always run passport refine (4 ROI OCRs) — base page OCR is often incomplete
+    // Optional document-specific OCR refine (e.g. passport ROIs)
     if (typeof document.refineOcr === 'function') {
       timings.start('refineOcr');
       try {
@@ -178,21 +121,22 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
       timings.end('refineOcr');
     }
 
+    // --- Classification ---
     stage = 'classification';
     timings.start('classification');
-    const features = await extractFeatures(
-      processedPages[0].processedBuffer,
+    const { features, classification } = await stageClassify(
+      document,
+      processedPages,
       ocrResult,
       imageQuality
     );
-    const classification = classifyDocument(document, features, ocrResult);
     timings.end('classification');
 
     logStage({
       durationMs: timings.toJSON().classification,
       classificationConfidence: classification.classificationConfidence,
-      classificationPassed: classification.passed,
-      documentType: classification.documentType,
+      status: classification.passed ? 'ok' : 'stopped',
+      stopReason: classification.passed ? undefined : 'Classification confidence below threshold',
     });
 
     if (!classification.passed) {
@@ -207,77 +151,96 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
         fullOcrText: ocrResult.text || '',
         qualityWarnings: ocrQuality.warnings,
         orientationAngle: processedPages[0].orientationAngle,
+        mode: document.mode,
       });
-      logStage({ stopReason: stopped.reason, status: 'stopped' });
+      logStage({ stopReason: stopped.stopReason, status: 'stopped' });
       return stopped;
     }
 
+    // --- Extraction ---
     stage = 'extraction';
     timings.start('extraction');
-    const extraction = document.extract(ocrResult, features);
-    let data = mergeWithGenerics(extraction.data, ocrResult, features);
+    const extraction = stageExtract(document, ocrResult, features);
+    let data = extraction.data;
     timings.end('extraction');
     logStage({
       durationMs: timings.toJSON().extraction,
       extractionConfidence: extraction.extractionConfidence,
-      extractionIssues: extraction.extractionIssues,
+      status: 'ok',
     });
 
-    let validationResult = { passed: true, checks: {}, reason: null };
+    // --- Validation (if supported) ---
+    let validationResult = { passed: true, checks: {}, reasons: [], reason: null };
+    if (document.supportsValidation) {
+      stage = 'validation';
+      timings.start('validation');
+      validationResult = stageValidate(document, extraction.data);
+      data = document.normalizeData(data, validationResult);
+      timings.end('validation');
+      logStage({
+        durationMs: timings.toJSON().validation,
+        validationPassed: validationResult.passed,
+        status: 'ok',
+      });
+    }
+
+    // --- Risk assessment (verification only) ---
     let decision = null;
     let aggregation = {
       fraudIndicators: [],
       qualityWarnings: [],
       categoryScores: {},
       checks: {},
+      reasoning: [],
     };
     let detectorResults = [];
 
     if (document.mode === 'verification') {
-      stage = 'validation';
-      timings.start('validation');
-      validationResult = document.validate(extraction.data);
-      data = document.normalizeData(data, validationResult);
-      timings.end('validation');
-      logStage({
-        durationMs: timings.toJSON().validation,
-        validationPassed: validationResult.passed,
-      });
-
-      stage = 'authenticity';
-      timings.start('authenticity');
-      const ctx = {
+      stage = 'risk';
+      timings.start('risk');
+      const risk = await stageRiskAssess(document, {
         features,
         documentType: document.type,
         validationResult,
         extractionConfidence: extraction.extractionConfidence,
         data,
-      };
-      const detectorNames = [...new Set(document.authenticityChecks())];
-      detectorResults = await runRuleEngine(ctx, detectorNames);
-      aggregation = aggregateScores(detectorResults);
-      decision = buildDecision(validationResult, aggregation);
-      timings.end('authenticity');
+      });
+      detectorResults = risk.detectorResults;
+      aggregation = risk.aggregation;
+      decision = risk.decision;
+      timings.end('risk');
       logStage({
-        durationMs: timings.toJSON().authenticity,
-        authenticityScore: aggregation.authenticityScore,
-        authenticityPassed: decision.authenticity?.passed,
-        overallPassed: decision.overallPassed,
+        durationMs: timings.toJSON().risk,
+        riskScore: aggregation.riskScore,
+        riskPassed: decision?.riskAssessment?.passed ?? decision?.authenticity?.passed,
+        validationPassed: validationResult.passed,
+        status: 'ok',
       });
     }
 
+    // --- Response ---
     stage = 'complete';
+    const qualityWarnings = [
+      ...(ocrQuality.warnings || []),
+      ...(aggregation.qualityWarnings || []),
+    ];
+    if (extraction.extractionBelowThreshold) {
+      qualityWarnings.push(
+        `Extraction confidence ${extraction.extractionConfidence}% below threshold ${config.extractionThreshold}%`
+      );
+    }
+
     const response = buildCompletedResponse({
       document,
       decision,
+      aggregation,
       ocrConfidence: ocrResult.ocrConfidence,
       extractionConfidence: extraction.extractionConfidence,
+      extractionReasons: extraction.extractionReasons,
       extractionIssues: extraction.extractionIssues,
+      extractionBelowThreshold: extraction.extractionBelowThreshold,
       fraudIndicators: aggregation.fraudIndicators,
-      qualityWarnings: [
-        ...(ocrQuality.warnings || []),
-        ...(aggregation.qualityWarnings || []),
-      ],
+      qualityWarnings,
       detectorResults,
       categoryScores: aggregation.categoryScores,
       checks: aggregation.checks,
@@ -287,6 +250,7 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
       orientationAngle: processedPages[0].orientationAngle,
       timings: timings.toJSON(),
       classification,
+      validationResult: document.supportsValidation ? validationResult : null,
     });
 
     logStage({
@@ -295,14 +259,18 @@ async function processDocument(filePath, filename, requestId, documentTypeOrSlug
       classificationConfidence: response.classificationConfidence,
       extractionConfidence: response.extractionConfidence,
       validationPassed: response.validation?.passed,
-      authenticityScore: response.authenticity?.score,
+      riskScore: response.riskAssessment?.overallScore ?? response.authenticity?.score,
+      riskPassed: response.riskAssessment?.passed ?? response.authenticity?.passed,
       overallPassed: response.overallPassed,
       totalMs: timings.toJSON().total,
     });
 
     return response;
   } catch (err) {
-    logger.error({ requestId, stage, err: err.message }, 'Pipeline failed');
+    logger.error(
+      buildStageLog({ requestId, documentType: document.type, stage, status: 'error' }),
+      err.message
+    );
     throw err;
   } finally {
     if (tempDir) await removeDir(tempDir);

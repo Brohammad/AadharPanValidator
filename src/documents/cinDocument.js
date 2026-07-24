@@ -4,13 +4,23 @@ const { extractLabeledValue, extractLabeledList } = require('../shared/labeledFi
 const { extractLabeledDate } = require('../shared/dates');
 const { extractAddressAfterLabel } = require('../shared/address');
 const { extractCinNumbers } = require('../shared/regex');
+const { validateCin } = require('../validators/cin');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
 const docConfig = require('../config/documents').cin;
 
 const MANDATORY = ['cinNumber', 'companyName'];
+const OPTIONAL = [
+  'incorporationDate',
+  'registeredOfficeAddress',
+  'roc',
+  'authorizedCapital',
+  'paidUpCapital',
+  'directors',
+];
 
 class CinDocument extends BaseDocument {
   constructor() {
-    super('CIN', 'CIN Document', { mode: 'extraction' });
+    super('CIN', 'CIN Document', { mode: 'extraction', supportsValidation: true });
   }
 
   identify(features) {
@@ -22,7 +32,6 @@ class CinDocument extends BaseDocument {
       detailed.reasons.push(`Matched CIN number (${cins[0]})`);
       detailed.signals.cinNumber = true;
     }
-    // Require more than a single weak keyword match
     if (detailed.matchCount < 2 && !detailed.signals.cinRegex && !detailed.signals.cinNumber) {
       detailed.reasons.push('Fewer than 2 independent CIN signals');
     }
@@ -60,7 +69,6 @@ class CinDocument extends BaseDocument {
       ]),
     };
 
-    // Fallback company name: line near CIN
     if (!data.companyName && data.cinNumber) {
       const idx = text.toUpperCase().indexOf(data.cinNumber);
       if (idx > 0) {
@@ -77,20 +85,33 @@ class CinDocument extends BaseDocument {
       if (!data[field]) issues.push(`${field} not found`);
     }
 
-    const foundMandatory = MANDATORY.filter((f) => data[f]).length;
-    const optional = [
-      data.incorporationDate,
-      data.registeredOfficeAddress,
-      data.roc,
-      data.authorizedCapital,
-      data.paidUpCapital,
-      data.directors?.length,
-    ].filter(Boolean).length;
-    const extractionConfidence = Math.round(
-      (foundMandatory / MANDATORY.length) * 55 + (optional / 6) * 45
-    );
+    const formatChecks = [];
+    if (data.cinNumber) {
+      const cinVal = validateCin(data.cinNumber);
+      formatChecks.push({
+        name: 'cinFormat',
+        passed: cinVal.passed,
+        message: cinVal.passed ? 'CIN format valid' : cinVal.reason,
+      });
+    }
 
-    return { data, extractionConfidence, extractionIssues: issues };
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY,
+      optionalFields: OPTIONAL,
+      data,
+      formatChecks,
+      issues,
+      mandatoryWeight: 0.55,
+      optionalWeight: 0.25,
+      ocrWeight: 0.2,
+    });
+
+    return { data, ...scored };
+  }
+
+  validate(data) {
+    return validateCin(data.cinNumber);
   }
 }
 

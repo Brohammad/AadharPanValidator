@@ -6,6 +6,9 @@ const { parseMrz } = require('../shared/mrz');
 const { extractGender } = require('./fieldExtractors');
 const { refinePassportOcr } = require('../ocr/passportOcr');
 const { scoreKeywordsDetailed } = require('../shared/keywords');
+const { validatePassport } = require('../validators/passport');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
+const { checkDateOrder } = require('../validators/dates');
 const docConfig = require('../config/documents').passport;
 
 const MANDATORY = ['passportNumber', 'surname', 'givenName'];
@@ -162,7 +165,7 @@ function buildMrzFromFields(data) {
 
 class PassportDocument extends BaseDocument {
   constructor() {
-    super('PASSPORT', 'Passport', { mode: 'extraction' });
+    super('PASSPORT', 'Passport', { mode: 'extraction', supportsValidation: true });
   }
 
   async refineOcr(ocrResult, page) {
@@ -506,29 +509,59 @@ class PassportDocument extends BaseDocument {
       if (!data[field]) issues.push(`${field} not found`);
     }
 
-    const foundMandatory = MANDATORY.filter((f) => data[f]).length;
-    const optional = [
-      data.nationality,
-      data.dateOfBirth,
-      data.dateOfExpiry,
-      data.gender,
-      data.mrz,
-      data.placeOfBirth,
-      data.dateOfIssue,
-      data.placeOfIssue,
-      data.passportType,
-      data.countryCode,
-      data.issuingAuthority,
-      data.personalNumber,
-    ].filter(Boolean).length;
+    const formatChecks = [];
+    if (data.passportNumber) {
+      const ok = /^[A-Z]\d{7}$/.test(String(data.passportNumber).toUpperCase());
+      formatChecks.push({
+        name: 'passportNumber',
+        passed: ok,
+        message: ok ? 'Passport number format valid' : 'Passport number format invalid',
+      });
+    }
 
-    return {
+    const consistencyChecks = [];
+    const order = checkDateOrder(data.dateOfIssue, data.dateOfExpiry, {
+      label: 'issue before expiry',
+    });
+    if (!order.skipped) {
+      consistencyChecks.push({
+        name: 'issueBeforeExpiry',
+        passed: order.passed,
+        message: order.reason || 'Issue date before expiry',
+      });
+    }
+
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY,
+      optionalFields: [
+        'nationality',
+        'dateOfBirth',
+        'dateOfExpiry',
+        'gender',
+        'mrz',
+        'placeOfBirth',
+        'dateOfIssue',
+        'placeOfIssue',
+        'passportType',
+        'countryCode',
+        'issuingAuthority',
+        'personalNumber',
+      ],
       data,
-      extractionConfidence: Math.round(
-        (foundMandatory / MANDATORY.length) * 50 + (optional / 12) * 50
-      ),
-      extractionIssues: issues,
-    };
+      formatChecks,
+      consistencyChecks,
+      issues,
+      mandatoryWeight: 0.5,
+      optionalWeight: 0.3,
+      ocrWeight: 0.2,
+    });
+
+    return { data, ...scored };
+  }
+
+  validate(data) {
+    return validatePassport(data);
   }
 }
 

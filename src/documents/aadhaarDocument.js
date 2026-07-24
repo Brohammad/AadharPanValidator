@@ -1,8 +1,10 @@
 const BaseDocument = require('./baseDocument');
 const { validateAadhaar, extractAadhaarNumbers } = require('../validators/aadhaar');
 const { extractPersonName, extractDob, extractGender } = require('./fieldExtractors');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
 
 const MANDATORY_FIELDS = ['name', 'aadhaar'];
+const OPTIONAL_FIELDS = ['dob', 'yearOfBirth', 'gender', 'address'];
 
 class AadhaarDocument extends BaseDocument {
   constructor() {
@@ -116,27 +118,63 @@ class AadhaarDocument extends BaseDocument {
     for (const field of MANDATORY_FIELDS) {
       if (data[field]) foundMandatory++;
     }
-    const optionalFound = [data.dob, data.yearOfBirth, data.gender, data.address].filter(Boolean)
-      .length;
-    const extractionConfidence = Math.round(
-      (foundMandatory / MANDATORY_FIELDS.length) * 60 + (optionalFound / 4) * 40
-    );
+    void foundMandatory;
 
-    return { data, extractionConfidence, extractionIssues: issues };
+    const formatChecks = [];
+    if (data.aadhaar) {
+      const result = validateAadhaar(data.aadhaar);
+      formatChecks.push({
+        name: 'aadhaarChecksum',
+        passed: result.valid,
+        message: result.valid ? 'Aadhaar checksum valid' : result.reason,
+      });
+    }
+
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY_FIELDS,
+      optionalFields: OPTIONAL_FIELDS,
+      data,
+      formatChecks,
+      issues,
+      mandatoryWeight: 0.6,
+      optionalWeight: 0.25,
+      ocrWeight: 0.15,
+    });
+
+    return { data, ...scored };
   }
 
   validate(data) {
     const checks = { checksum: false, pattern: false, format: false };
+    const reasons = [];
     if (!data.aadhaar) {
-      return { passed: false, checks, reason: 'Aadhaar number missing' };
+      return {
+        passed: false,
+        checks,
+        reasons: [
+          { code: 'AADHAAR_MISSING', message: 'Aadhaar number missing', stage: 'validation' },
+        ],
+        reason: 'Aadhaar number missing',
+      };
     }
     checks.pattern = /^\d{12}$/.test(String(data.aadhaar).replace(/\s/g, ''));
     const result = validateAadhaar(data.aadhaar);
     checks.checksum = result.valid;
     checks.format = result.valid;
+    if (!result.valid) {
+      reasons.push({
+        code: result.reason?.includes('checksum') || result.reason?.includes('Verhoeff')
+          ? 'CHECKSUM_MISMATCH'
+          : 'AADHAAR_INVALID',
+        message: result.reason || 'Aadhaar validation failed',
+        stage: 'validation',
+      });
+    }
     return {
       passed: result.valid,
       checks,
+      reasons,
       reason: result.valid ? null : result.reason,
       normalized: result.normalized,
     };
@@ -149,7 +187,7 @@ class AadhaarDocument extends BaseDocument {
     return data;
   }
 
-  authenticityChecks() {
+  riskChecks() {
     return [
       'checksumValidator',
       'layoutDetector',

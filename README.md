@@ -26,10 +26,10 @@ Document type is **selected by the caller** (UI dropdown or API slug) — there 
 
 | Document | Mode | What you get |
 |----------|------|----------------|
-| Aadhaar | Verification | Field extract + checksum validation + authenticity / fraud signals |
-| PAN | Verification | Field extract + PAN format checks + authenticity / fraud signals |
-| Passport | Extraction | Structured fields (number, name, dates, MRZ cues, …) |
-| CIN | Extraction | CIN number, company name, ROC, capital, … |
+| Aadhaar | Verification | Field extract + checksum validation + integrity / risk indicators |
+| PAN | Verification | Field extract + PAN format checks + integrity / risk indicators |
+| Passport | Extraction | Structured fields + MRZ / date validation |
+| CIN | Extraction | CIN number, company name, ROC, capital, + CIN format validation |
 | Security Clearance | Extraction | Employee, clearance type/level, validity, issuer, … |
 | Security Programme | Extraction | Programme title, version, approvals, sections, … |
 | Authority Letter | Extraction | Authorized person, company, scope, validity, contacts, … |
@@ -100,7 +100,10 @@ npm run dev
 | `npm start` | `node src/server.js` | Run production-style server |
 | `npm run dev` | `node --watch src/server.js` | Restart on code changes |
 | `npm run mocks` | `node scripts/generate-mocks.js` | Regenerate extraction mock PDFs/PNG/JPG |
-| `npm run test:extract` | `node scripts/batch-extract.js` | Test the 4 extraction types across formats |
+| `npm run fixtures` | `node scripts/generate-fixtures.js` | Build blur/rotate/screenshot fixture variants |
+| `npm test` | unit + regression smoke | CI-friendly automated tests |
+| `npm run test:unit` | `node --test test/**/*.test.js` | Validator / pipeline unit tests |
+| `npm run test:extract` | `node scripts/batch-extract.js` | Full OCR regression on 24 mocks |
 | `npm run batch` | `node scripts/batch-verify.js` | Batch-verify sample Aadhaar/PAN images (if present) |
 
 Default port is **3000**. Change with `PORT=4000 npm start` or edit `.env`.
@@ -198,26 +201,44 @@ curl -X POST http://localhost:3000/api/pan \
 
 ```json
 {
+  "stage": "complete",
+  "status": "completed",
   "mode": "verification",
   "documentType": "AADHAAR",
-  "validation": { "passed": true, "checks": { "checksum": true } },
+  "validation": { "passed": true, "checks": { "checksum": true }, "reasons": [] },
+  "riskAssessment": {
+    "overallScore": 64,
+    "threshold": 70,
+    "passed": false,
+    "indicators": ["…"],
+    "reasoning": [{ "code": "RISK_ABOVE_THRESHOLD", "message": "…" }]
+  },
   "authenticity": { "passed": false, "score": 64, "threshold": 70 },
   "overallPassed": false,
+  "extractionConfidence": 72,
+  "extractionReasons": [],
   "data": { "name": "...", "aadhaar": "..." },
   "fullOcrText": "...",
   "timings": { "total": 461 }
 }
 ```
 
+`riskAssessment` is a **heuristic integrity score** (not an official authenticity verdict). `authenticity` is kept as a deprecated mirror for compatibility.
+
 ### Extraction response (Passport, CIN, clearance, programme, authority letter)
 
 ```json
 {
+  "stage": "complete",
+  "status": "completed",
   "mode": "extraction",
   "documentType": "CIN",
   "ocrConfidence": 96,
   "extractionConfidence": 93,
+  "extractionReasons": [{ "code": "MANDATORY_FIELDS_COMPLETE", "message": "…" }],
   "extractionIssues": [],
+  "validation": { "passed": true, "checks": { "format": true } },
+  "riskAssessment": null,
   "data": {
     "cinNumber": "U72900MH2018PTC312456",
     "companyName": "AVIO SECURITY SERVICES PRIVATE LIMITED"
@@ -235,12 +256,13 @@ If OCR or type-fit fails gates, the API returns early:
 {
   "stage": "ocr",
   "status": "stopped",
+  "stopReason": "OCR quality below configured threshold",
   "reason": "OCR quality below configured threshold",
   "ocrConfidence": 24,
-  "reasons": ["OCR confidence 24% below threshold 40%"]
+  "mode": "extraction",
+  "reasons": [{ "code": "OCR_CONFIDENCE_LOW", "message": "OCR confidence 24% below threshold 40%" }]
 }
 ```
-
 ---
 
 ## Mock documents and tests
@@ -260,15 +282,24 @@ npm run mocks
 
 Requires `pdftoppm` (Poppler) so PDF pages can be rasterized to PNG/JPG.
 
-### Run extraction tests
+### Generate degraded fixtures
 
-Runs the pipeline against all 24 mock files (4 types × 2 variants × 3 formats) and checks key fields:
+Builds blurry / rotated / screenshot-like variants under `assets/fixtures/` (synthetic only):
 
 ```bash
-npm run test:extract
+npm run fixtures
 ```
 
-On success:
+### Automated tests
+
+```bash
+npm test                 # unit + regression smoke
+npm run test:unit        # validators, OCR gate, classify, response shapes
+npm run test:extract     # full OCR pipeline on 24 mocks
+npm run test:regression  # smoke checks for gates + fixture presence
+```
+
+On success for extraction:
 
 ```text
 24/24 passed
@@ -296,13 +327,20 @@ Copy `.env.example` → `.env` and adjust as needed.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PORT` | `3000` | HTTP port |
-| `MAX_FILE_SIZE` | `10485760` | Upload limit (bytes) |
+| `MAX_FILE_SIZE` / `MAX_UPLOAD_SIZE` | `10485760` | Upload limit (bytes) |
 | `OCR_CONFIDENCE_THRESHOLD` | `40` | Min OCR confidence to continue |
 | `CLASSIFICATION_THRESHOLD` | `35` | Min type-fit score for requested document |
 | `CLASSIFICATION_MISMATCH_MARGIN` | `15` | Reject if another type scores this much higher |
-| `AUTH_SCORE_THRESHOLD` | `70` | Authenticity pass mark (verification mode) |
+| `EXTRACTION_THRESHOLD` | `45` | Soft warn when extraction confidence is low |
+| `RISK_THRESHOLD` | `70` | Integrity / risk pass mark (verification) |
+| `AUTH_SCORE_THRESHOLD` | `70` | Deprecated alias for `RISK_THRESHOLD` |
 | `OCR_BLUR_MIN` | `40` | Soft blur floor used with OCR quality |
 | `OCR_MIN_ALNUM` | `25` | Min alphanumeric characters in OCR text |
+| `OCR_RESIZE_WIDTH_PHOTO` | `1800` | Photo preprocess resize target |
+| `OCR_RESIZE_WIDTH_PDF` | `1600` | PDF/embedded resize target |
+| `PDF_DPI` | `200` | Poppler rasterization DPI |
+| `OCR_GOOD_ENOUGH_SCORE` | `140` | Tesseract early-stop score |
+| `OCR_FAST_GOOD_ENOUGH_SCORE` | `80` | Fast-path early-stop score |
 | `UPLOAD_DIR` | `uploads` | Multipart upload directory |
 | `TEMP_DIR` | `temp` | Working / result temp files |
 | `LOG_LEVEL` | `info` | Pino log level |
@@ -314,23 +352,27 @@ Copy `.env.example` → `.env` and adjust as needed.
 ```text
 avioagent/
 ├── assets/
-│   └── mocks/              # Generated PDF/PNG/JPG fixtures (extraction types)
+│   ├── mocks/              # Generated PDF/PNG/JPG fixtures (extraction types)
+│   └── fixtures/           # Degraded variants (blur/rotate/screenshot)
 ├── public/                 # Static HTML/JS/CSS UI
 ├── scripts/
 │   ├── generate-mocks.js   # Build extraction mocks
+│   ├── generate-fixtures.js
 │   ├── batch-extract.js    # Test extraction mocks
+│   ├── batch-regression.js
 │   └── batch-verify.js     # Optional Aadhaar/PAN batch
+├── test/                   # node:test unit tests
 ├── src/
 │   ├── server.js           # Entry point
 │   ├── app.js              # Express app
 │   ├── config/             # Env + per-document keyword/label config
 │   ├── controllers/        # HTTP handlers
 │   ├── documents/          # One plugin per document type + registry
-│   ├── pipeline/           # Orchestrator, classify, OCR quality, response
-│   ├── preprocessing/      # Crop, orientation, OCR variants, PDF
+│   ├── pipeline/           # Orchestrator, stages, classify, OCR quality, response
+│   ├── preprocessing/      # Modular stages + PDF prepare
 │   ├── ocr/                # Tesseract workers
-│   ├── rules/              # Authenticity / fraud detectors (verification)
-│   ├── validators/         # Aadhaar / PAN validators
+│   ├── rules/              # Risk / integrity detectors (verification)
+│   ├── validators/         # Aadhaar, PAN, CIN, passport, dates
 │   └── shared/             # Shared field extractors
 ├── .env.example
 ├── package.json
@@ -342,23 +384,24 @@ avioagent/
 ## Pipeline overview
 
 ```text
-Upload → Preprocess → OCR → OCR quality gate
-  → Classification confidence (type-fit for requested endpoint)
-  → Extract → Validate* → Authenticity* → Response
+Upload → File validation → Prepare pages → Preprocess stages → OCR
+  → OCR quality gate → Classification (type-fit) → Extract
+  → Validate* → Risk assessment** → Response
 ```
 
-\* Validation and authenticity run only for **verification** plugins (Aadhaar, PAN). Extraction-only types skip them.
+\* Validation runs for plugins with `supportsValidation` (Aadhaar, PAN, Passport, CIN, and date-checked extraction docs).
+\*\* Risk assessment (integrity indicators) runs for **verification** plugins only. It does **not** prove a document is officially genuine.
 
 Architecture:
 
 ```text
 POST /api/{slug}
   → Controller resolves document module from registry
-  → Preprocess → OCR → OCR quality gate (may stop)
+  → preparePages → preprocess → OCR → OCR quality gate (may stop)
   → Classification type-fit gate (may stop as UNKNOWN)
-  → document.extract()
-  → [verification only] validate + authenticity rule engine
-  → Response builder (stage / status / reasons)
+  → document.extract() + extraction confidence reasons
+  → validate (if supported) + riskChecks (verification)
+  → Response builder (stage / status / reasons / riskAssessment)
 ```
 
 ---
@@ -366,11 +409,12 @@ POST /api/{slug}
 ## Adding a document type
 
 1. Add identify/label config in `src/config/documents.js` (optional).
-2. Create `src/documents/<name>Document.js` extending `BaseDocument` (`mode: 'verification'` or `'extraction'`).
-3. Register the class in `src/documents/registry.js` and add a slug in `TYPE_SLUGS`.
-4. Endpoint is available as `POST /api/{slug}` with no route file changes.
+2. Create `src/documents/<name>Document.js` extending `BaseDocument` (`mode: 'verification'` or `'extraction'`; set `supportsValidation: true` when implementing `validate()`).
+3. Implement `identify`, `extract`, and optionally `validate` / `riskChecks` / `refineOcr`.
+4. Register the class in `src/documents/registry.js` and add a slug in `TYPE_SLUGS`.
+5. Endpoint is available as `POST /api/{slug}` with no core pipeline changes.
 
-Reuse helpers under `src/shared/` (labeled fields, dates, regex, MRZ, tables, presence, …).
+Reuse helpers under `src/shared/` and `src/validators/` (labeled fields, dates, regex, MRZ, CIN, tables, presence, …).
 
 ---
 
@@ -391,4 +435,4 @@ Reuse helpers under `src/shared/` (labeled fields, dates, regex, MRZ, tables, pr
 
 ## Disclaimer
 
-Heuristic OCR analysis only — not legal proof of document originality or identity.
+Heuristic OCR and document-integrity analysis only — not legal proof of document originality, official authenticity, or identity. `riskAssessment` scores are advisory indicators for downstream systems.

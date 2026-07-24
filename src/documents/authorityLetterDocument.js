@@ -7,9 +7,17 @@ const {
   detectSealPresence,
 } = require('../shared/presence');
 const { extractEmails, extractPhones } = require('../shared/regex');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
 const docConfig = require('../config/documents').authorityLetter;
 
 const MANDATORY = ['authorizedPerson', 'companyName'];
+const OPTIONAL = [
+  'letterReferenceNumber',
+  'letterDate',
+  'designation',
+  'authorityDescription',
+  'validityPeriod',
+];
 
 class AuthorityLetterDocument extends BaseDocument {
   constructor() {
@@ -71,7 +79,6 @@ class AuthorityLetterDocument extends BaseDocument {
       companySealPresence: detectSealPresence(text, features),
     };
 
-    // Fallback: "M/s Company" or letterhead first substantial line
     if (!data.companyName) {
       const header = text
         .split('\n')
@@ -84,19 +91,18 @@ class AuthorityLetterDocument extends BaseDocument {
       if (!data[field]) issues.push(`${field} not found`);
     }
 
-    const foundMandatory = MANDATORY.filter((f) => data[f]).length;
-    const optional = [
-      data.letterReferenceNumber,
-      data.letterDate,
-      data.designation,
-      data.authorityDescription,
-      data.validityPeriod,
-    ].filter(Boolean).length;
-    const extractionConfidence = Math.round(
-      (foundMandatory / MANDATORY.length) * 55 + (optional / 5) * 45
-    );
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY,
+      optionalFields: OPTIONAL,
+      data,
+      issues,
+      mandatoryWeight: 0.55,
+      optionalWeight: 0.3,
+      ocrWeight: 0.15,
+    });
 
-    return { data, extractionConfidence, extractionIssues: issues };
+    return { data, ...scored };
   }
 }
 

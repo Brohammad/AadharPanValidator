@@ -7,13 +7,27 @@ const {
   extractTables,
   extractBulletLists,
 } = require('../shared/tables');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
+const { checkDateOrder } = require('../validators/dates');
 const docConfig = require('../config/documents').securityProgramme;
 
 const MANDATORY = ['programmeTitle'];
+const OPTIONAL = [
+  'organizationName',
+  'documentNumber',
+  'version',
+  'effectiveDate',
+  'preparedBy',
+  'approvedBy',
+  'sectionHeadings',
+];
 
 class SecurityProgrammeDocument extends BaseDocument {
   constructor() {
-    super('SECURITY_PROGRAMME', 'Security Programme', { mode: 'extraction' });
+    super('SECURITY_PROGRAMME', 'Security Programme', {
+      mode: 'extraction',
+      supportsValidation: true,
+    });
   }
 
   identify(features) {
@@ -52,21 +66,63 @@ class SecurityProgrammeDocument extends BaseDocument {
       if (!data[field]) issues.push(`${field} not found`);
     }
 
-    const foundMandatory = MANDATORY.filter((f) => data[f]).length;
-    const optional = [
-      data.organizationName,
-      data.documentNumber,
-      data.version,
-      data.effectiveDate,
-      data.preparedBy,
-      data.approvedBy,
-      data.sectionHeadings?.length,
-    ].filter(Boolean).length;
-    const extractionConfidence = Math.round(
-      (foundMandatory / MANDATORY.length) * 50 + (optional / 7) * 50
-    );
+    const consistencyChecks = [];
+    const order = checkDateOrder(data.effectiveDate, data.reviewDate, {
+      label: 'effective before review',
+      allowEqual: true,
+    });
+    if (!order.skipped) {
+      consistencyChecks.push({
+        name: 'dateOrder',
+        passed: order.passed,
+        message: order.reason || 'Dates ordered correctly',
+      });
+    }
 
-    return { data, extractionConfidence, extractionIssues: issues };
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY,
+      optionalFields: OPTIONAL,
+      data,
+      consistencyChecks,
+      issues,
+      mandatoryWeight: 0.5,
+      optionalWeight: 0.35,
+      ocrWeight: 0.15,
+    });
+
+    return { data, ...scored };
+  }
+
+  validate(data) {
+    const checks = { programmeTitle: !!data.programmeTitle };
+    const reasons = [];
+    if (!data.programmeTitle) {
+      reasons.push({
+        code: 'MISSING_MANDATORY',
+        message: 'programmeTitle is required',
+        stage: 'validation',
+      });
+    }
+    const order = checkDateOrder(data.effectiveDate, data.reviewDate, {
+      label: 'effective before review',
+      allowEqual: true,
+    });
+    checks.dateOrder = order.passed || !!order.skipped;
+    if (!order.skipped && !order.passed) {
+      reasons.push({
+        code: order.code || 'DATE_ORDER_INVALID',
+        message: order.reason,
+        stage: 'validation',
+      });
+    }
+    const passed = checks.programmeTitle && checks.dateOrder;
+    return {
+      passed,
+      checks,
+      reasons,
+      reason: passed ? null : reasons[0]?.message,
+    };
   }
 }
 

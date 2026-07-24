@@ -4,12 +4,13 @@ class BaseDocument {
   /**
    * @param {string} type - Machine type key (e.g. AADHAAR, PASSPORT)
    * @param {string} label - Human label
-   * @param {{ mode?: 'verification' | 'extraction' }} [options]
+   * @param {{ mode?: 'verification' | 'extraction', supportsValidation?: boolean }} [options]
    */
   constructor(type, label, options = {}) {
     this.type = type;
     this.label = label;
     this.mode = options.mode || 'verification';
+    this.supportsValidation = options.supportsValidation ?? this.mode === 'verification';
   }
 
   /**
@@ -29,17 +30,17 @@ class BaseDocument {
   }
 
   /**
-   * Format / checksum validation. Extraction-only docs use the default pass-through.
+   * Format / checksum validation. Override when supportsValidation is true.
    */
   validate(_data) {
-    return { passed: true, checks: {}, reason: null };
+    return { passed: true, checks: {}, reasons: [], reason: null };
   }
 
   /**
-   * Detector names for the authenticity rule engine.
+   * Detector names for the risk / integrity rule engine.
    * Extraction-only documents return [].
    */
-  authenticityChecks() {
+  riskChecks() {
     if (this.mode === 'extraction') return [];
     return [
       'layoutDetector',
@@ -56,6 +57,11 @@ class BaseDocument {
     ];
   }
 
+  /** @deprecated Prefer riskChecks() */
+  authenticityChecks() {
+    return this.riskChecks();
+  }
+
   /**
    * Apply validator-normalized ID into the correct data field.
    * Override in verification documents that normalize a primary ID.
@@ -65,7 +71,7 @@ class BaseDocument {
   }
 
   /**
-   * Build the API response for this document type.
+   * Legacy helper — live pipeline uses responseBuilder.
    */
   buildResponse(ctx) {
     if (this.mode === 'extraction') {
@@ -75,6 +81,10 @@ class BaseDocument {
         ocrConfidence: ctx.ocrConfidence,
         extractionConfidence: ctx.extractionConfidence,
         extractionIssues: ctx.extractionIssues || [],
+        extractionReasons: ctx.extractionReasons || [],
+        validation: ctx.validation || null,
+        riskAssessment: null,
+        authenticity: null,
         data: ctx.data,
         fullOcrText: ctx.data?.fullOcrText || ctx.ocrText || '',
         timings: ctx.timings,
@@ -88,6 +98,7 @@ class BaseDocument {
       ocrConfidence: ctx.ocrConfidence,
       extractionConfidence: ctx.extractionConfidence,
       extractionIssues: ctx.extractionIssues,
+      extractionReasons: ctx.extractionReasons || [],
       fraudIndicators: ctx.fraudIndicators,
       qualityWarnings: ctx.qualityWarnings || [],
       detectorResults: ctx.detectorResults,
@@ -103,10 +114,23 @@ class BaseDocument {
 
   buildUnknownResponse(ctx) {
     return {
-      mode: 'verification',
+      mode: this.mode || 'verification',
       documentType: 'UNKNOWN',
       validation: { passed: false, checks: {}, reason: 'Unknown document type' },
-      authenticity: { passed: false, score: 0, threshold: config.authScoreThreshold },
+      riskAssessment: {
+        overallScore: 0,
+        threshold: config.riskThreshold,
+        passed: false,
+        indicators: ['Unknown document type'],
+        reasoning: [
+          {
+            code: 'UNKNOWN_TYPE',
+            message: 'Document type not recognized',
+            stage: 'classification',
+          },
+        ],
+      },
+      authenticity: { passed: false, score: 0, threshold: config.riskThreshold },
       overallPassed: false,
       ocrConfidence: ctx.ocrConfidence,
       extractionConfidence: 0,

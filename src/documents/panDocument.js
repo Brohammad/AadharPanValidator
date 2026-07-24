@@ -5,8 +5,10 @@ const {
   extractFatherName,
   extractDob,
 } = require('./fieldExtractors');
+const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
 
 const MANDATORY_FIELDS = ['name', 'pan'];
+const OPTIONAL_FIELDS = ['fatherName', 'dob'];
 
 /** Fuzzy OCR helpers for hard CamScanner / low-contrast photos */
 function fuzzyHasIncomeTax(text) {
@@ -122,26 +124,59 @@ class PanDocument extends BaseDocument {
     for (const field of MANDATORY_FIELDS) {
       if (data[field]) foundMandatory++;
     }
-    const optionalFound = [data.fatherName, data.dob].filter(Boolean).length;
-    const extractionConfidence = Math.round(
-      (foundMandatory / MANDATORY_FIELDS.length) * 70 + (optionalFound / 2) * 30
-    );
+    void foundMandatory;
 
-    return { data, extractionConfidence, extractionIssues: issues };
+    const formatChecks = [];
+    if (data.pan) {
+      const result = validatePan(data.pan);
+      formatChecks.push({
+        name: 'panFormat',
+        passed: result.valid,
+        message: result.valid ? 'PAN format valid' : result.reason,
+      });
+    }
+
+    const scored = scoreExtractionConfidence({
+      ocrConfidence: ocr.ocrConfidence,
+      mandatoryFields: MANDATORY_FIELDS,
+      optionalFields: OPTIONAL_FIELDS,
+      data,
+      formatChecks,
+      issues,
+      mandatoryWeight: 0.7,
+      optionalWeight: 0.2,
+      ocrWeight: 0.1,
+    });
+
+    return { data, ...scored };
   }
 
   validate(data) {
     const checks = { pattern: false, format: false, length: false };
+    const reasons = [];
     if (!data.pan) {
-      return { passed: false, checks, reason: 'PAN number missing' };
+      return {
+        passed: false,
+        checks,
+        reasons: [{ code: 'PAN_MISSING', message: 'PAN number missing', stage: 'validation' }],
+        reason: 'PAN number missing',
+      };
     }
     const result = validatePan(data.pan);
     checks.pattern = result.valid;
     checks.format = result.valid;
     checks.length = String(data.pan).replace(/\s/g, '').length === 10;
+    if (!result.valid) {
+      reasons.push({
+        code: 'PAN_FORMAT_INVALID',
+        message: result.reason || 'PAN format invalid',
+        stage: 'validation',
+      });
+    }
     return {
       passed: result.valid,
       checks,
+      reasons,
       reason: result.valid ? null : result.reason,
       normalized: result.normalized,
     };
@@ -154,8 +189,7 @@ class PanDocument extends BaseDocument {
     return data;
   }
 
-  /** Slim detector set — full suite is too slow for interactive uploads */
-  authenticityChecks() {
+  riskChecks() {
     return [
       'checksumValidator',
       'layoutDetector',

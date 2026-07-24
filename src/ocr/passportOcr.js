@@ -280,16 +280,50 @@ async function recognizeRegion(buffer, options = {}) {
 /**
  * Focused passport OCR. Prefer the original (uncropped) page buffer so ROI
  * fractions match the physical passport layout.
+ * Skips ROI passes when base OCR already has a high-confidence MRZ + number.
  */
 async function refinePassportOcr(ocrResult, pageBuffer) {
+  const baseText = ocrResult?.text || '';
+  const baseParsed = parseMrz(baseText);
+  const baseNumber =
+    (baseParsed.fields && baseParsed.fields.passportNumber) ||
+    (baseText.toUpperCase().match(/\b([A-Z]\d{7})\b/) || [])[1];
+  const baseHasStrongMrz =
+    baseParsed.fields?.passportNumber &&
+    baseParsed.mrz &&
+    /P<[A-Z]{3}/.test(baseParsed.mrz) &&
+    (ocrResult?.ocrConfidence || 0) >= 65;
+
+  if (baseHasStrongMrz && baseNumber) {
+    return {
+      ...ocrResult,
+      passportRefine: {
+        skipped: true,
+        reason: 'Base OCR already has high-confidence MRZ and passport number',
+        passportNumber: baseNumber,
+        mrz: baseParsed.mrz,
+        mrzFields: baseParsed.fields,
+      },
+    };
+  }
+
   const regions = await buildPassportRegionBuffers(pageBuffer);
 
-  const [header, numberThresh, numberNorm, mrz] = await Promise.all([
+  // If number already confident, skip dual number ROI variants (keep MRZ + header)
+  const skipNumberRoi = !!(baseNumber && /^[A-Z]\d{7}$/.test(baseNumber) && (ocrResult?.ocrConfidence || 0) >= 60);
+
+  const tasks = [
     recognizeRegion(regions.headerRight, { psm: '6' }),
-    recognizeWhitelisted(regions.numberThresh, NUMBER_WHITELIST, '7'),
-    recognizeWhitelisted(regions.numberNorm, NUMBER_WHITELIST, '7'),
+    skipNumberRoi
+      ? Promise.resolve({ text: '', ocrConfidence: 0 })
+      : recognizeWhitelisted(regions.numberThresh, NUMBER_WHITELIST, '7'),
+    skipNumberRoi
+      ? Promise.resolve({ text: '', ocrConfidence: 0 })
+      : recognizeWhitelisted(regions.numberNorm, NUMBER_WHITELIST, '7'),
     recognizeWhitelisted(regions.mrz, MRZ_WHITELIST, '6'),
-  ]);
+  ];
+
+  const [header, numberThresh, numberNorm, mrz] = await Promise.all(tasks);
 
   const numberTexts = [numberThresh.text, numberNorm.text, header.text];
   const mrzCombined = [mrz.text, ocrResult.text].join('\n');

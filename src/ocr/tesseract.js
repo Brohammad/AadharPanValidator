@@ -1,5 +1,6 @@
 const path = require('path');
 const { createWorker, createScheduler } = require('tesseract.js');
+const config = require('../config');
 
 const LANG_PATH = path.resolve(__dirname, '../..');
 // English-only: eng+hin introduced diacritic noise on Latin PAN/Aadhaar fields
@@ -11,8 +12,13 @@ const PSM_PRIMARY = [
 ];
 const PSM_FALLBACK = [{ name: 'sparse', tessedit_pageseg_mode: '11' }];
 
-const GOOD_ENOUGH_SCORE = 140;
-const EXCELLENT_SCORE = 200;
+function goodEnoughScore(options = {}) {
+  return options.goodEnoughScore ?? config.ocrGoodEnoughScore ?? 140;
+}
+
+function excellentScore() {
+  return config.ocrExcellentScore ?? 200;
+}
 
 let schedulerPromise = null;
 
@@ -133,9 +139,10 @@ function scoreOrientationProbe(result) {
   return score;
 }
 
-async function runOcrModes(imageBuffer, modes) {
+async function runOcrModes(imageBuffer, modes, options = {}) {
   let best = null;
   let bestScore = -Infinity;
+  const enough = goodEnoughScore(options);
 
   for (const mode of modes) {
     try {
@@ -147,7 +154,7 @@ async function runOcrModes(imageBuffer, modes) {
         bestScore = score;
         best = result;
       }
-      if (score >= GOOD_ENOUGH_SCORE) break;
+      if (score >= enough) break;
     } catch {
       // try next mode
     }
@@ -161,7 +168,7 @@ async function runOcr(imageBuffer, options = {}) {
     ? [{ name: 'single_block', tessedit_pageseg_mode: '6' }]
     : PSM_PRIMARY;
 
-  const primary = await runOcrModes(imageBuffer, modes);
+  const primary = await runOcrModes(imageBuffer, modes, options);
   if (options.fast) {
     return (
       primary.result || {
@@ -175,11 +182,11 @@ async function runOcr(imageBuffer, options = {}) {
     );
   }
 
-  if (primary.score >= GOOD_ENOUGH_SCORE) {
+  if (primary.score >= goodEnoughScore(options)) {
     return primary.result;
   }
 
-  const fallback = await runOcrModes(imageBuffer, PSM_FALLBACK);
+  const fallback = await runOcrModes(imageBuffer, PSM_FALLBACK, options);
   if (fallback.score > primary.score) return fallback.result;
   return (
     primary.result || {
@@ -197,8 +204,8 @@ async function runOcrOnPages(ocrBuffers, ocrVariantsList = null, options = {}) {
   const pageResults = [];
   const maxVariants = options.maxVariants || Infinity;
   const fast = Boolean(options.fast);
-  const goodEnough = options.goodEnoughScore ?? GOOD_ENOUGH_SCORE;
-  const excellent = options.excellentScore ?? EXCELLENT_SCORE;
+  const goodEnough = goodEnoughScore(options);
+  const excellent = options.excellentScore ?? excellentScore();
 
   for (let i = 0; i < ocrBuffers.length; i++) {
     const variants = (
@@ -211,7 +218,7 @@ async function runOcrOnPages(ocrBuffers, ocrVariantsList = null, options = {}) {
     let bestScore = -Infinity;
 
     for (const variant of variants) {
-      const result = await runOcr(variant, { fast });
+      const result = await runOcr(variant, { fast, goodEnoughScore: goodEnough });
       const score = scoreOcrResult(result);
       if (score > bestScore) {
         bestScore = score;
@@ -269,5 +276,5 @@ module.exports = {
   scoreOcrResult,
   scoreOrientationProbe,
   terminateOcr,
-  GOOD_ENOUGH_SCORE,
+  GOOD_ENOUGH_SCORE: config.ocrGoodEnoughScore,
 };

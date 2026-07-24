@@ -71,10 +71,10 @@ async function rasterizePdfPages(filePath, outputDir) {
   const prefix = path.join(outputDir, 'page');
 
   try {
-    // 200 DPI is enough for ID cards and much faster than 300 on full A4
+    const dpi = String(config.pdfDpi || 200);
     await execFileAsync(
       'pdftoppm',
-      ['-png', '-r', '200', filePath, prefix],
+      ['-png', '-r', dpi, filePath, prefix],
       { timeout: 120000, maxBuffer: 40 * 1024 * 1024 }
     );
   } catch (err) {
