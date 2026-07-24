@@ -42,20 +42,25 @@ Document type is **selected by the caller** (UI dropdown or API slug) — there 
 
 | Requirement | Notes |
 |-------------|--------|
-| **Node.js 18+** | `node -v` |
+| **Node.js 20+** | `node -v` (required by `node-poppler`) |
 | **npm** | Comes with Node |
-| **Poppler** | Provides `pdftoppm` for PDF → image |
+| **Poppler** | Windows: bundled via npm (`node-poppler-win32`). macOS/Linux: install system Poppler for PDF support |
 
-### Install Poppler
+### Poppler (PDF support)
+
+| OS | What to do |
+|----|------------|
+| **Windows** | Nothing extra — `npm install` pulls Poppler binaries automatically |
+| **macOS** | `brew install poppler` |
+| **Ubuntu / Debian** | `sudo apt install poppler-utils` |
+
+JPG/PNG uploads work without Poppler. PDF uploads need Poppler (bundled on Windows, system install on Mac/Linux).
+
+Verify (optional):
 
 ```bash
-# macOS
-brew install poppler
-
-# Ubuntu / Debian
-sudo apt install poppler-utils
-
-# Verify
+# After npm install — Windows uses the bundled binary via the app
+# On Mac/Linux you can also check:
 pdftoppm -v
 ```
 
@@ -68,15 +73,21 @@ No GraphicsMagick / ImageMagick required.
 From the project root:
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies (on Windows this also installs Poppler binaries)
 npm install
 
 # 2. Create local config (optional but recommended)
+# macOS / Linux:
 cp .env.example .env
+# Windows (PowerShell / CMD):
+copy .env.example .env
 
 # 3. Start the server
 npm start
 ```
+
+**Windows one-liner path:** Node 20+ → `git clone` → `npm install` → `npm start` → open http://localhost:3000  
+No separate Poppler install needed for PDFs on Windows.
 
 You should see logs like:
 
@@ -422,7 +433,7 @@ Reuse helpers under `src/shared/` and `src/validators/` (labeled fields, dates, 
 
 | Problem | What to check |
 |---------|----------------|
-| `pdftoppm: command not found` | Install Poppler (`brew install poppler` / `apt install poppler-utils`) |
+| `pdftoppm: command not found` / PDF fails | **Windows:** re-run `npm install`. **macOS:** `brew install poppler`. **Linux:** `sudo apt install poppler-utils` |
 | PDF uploads fail | Confirm `pdftoppm -v` works; check server logs |
 | First request is slow | Normal until OCR workers warm; server warms them on boot |
 | `Classification confidence below threshold` | Wrong document type selected, or image too blurry / cropped |

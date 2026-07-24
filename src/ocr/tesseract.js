@@ -68,20 +68,35 @@ async function runOcrOnce(imageBuffer, options = {}) {
 function scoreOcrResult(result) {
   const text = result.text || '';
   const upper = text.toUpperCase();
-  let score = result.ocrConfidence * 0.4;
+  const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
+  const conf = result.ocrConfidence || 0;
+
+  // Empty / near-empty must never beat readable OCR just because confidence is high
+  if (!text.trim() || alnum < 8) {
+    return -100 + Math.min(conf, 20) * 0.1;
+  }
+
+  let score = conf * 0.4;
 
   if (/[A-Z]{5}[0-9OISB]{4}[A-Z]/.test(upper)) score += 80;
   if (/\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b/.test(text)) score += 80;
   if (/\bP<[A-Z]{3}|PASSPORT|REPUBLIC\s+OF|<<<</i.test(text)) score += 70;
   if (/\b[A-Z]\d{7}\b/.test(upper)) score += 50;
   if (/SURNAME|GIVEN\s*NAME|PLACE\s*OF\s*BIRTH|NATIONALITY/i.test(text)) score += 25;
+
+  // Exact + fuzzy ID keywords (phone/PDF OCR often mashes words together)
   if (/INCOME\s*TAX|GOVT\.?\s*OF\s*INDIA|GOVERNMENT\s*OF\s*INDIA|आयकर|भारत\s*सरकार/i.test(text)) {
     score += 40;
+  } else if (/INCOME|TAX\s*DEPART|DEFART|GOVT|GOVERNMENT/i.test(upper)) {
+    score += 25;
   }
-  if (/PERMANENT\s*ACCOUNT|AADHAAR|आधार|UIDAI|FATHER|पिता|DOB|MALE|FEMALE/i.test(text)) {
-    score += 30;
+  if (
+    /PERMANENT\s*ACCOUNT|AADHAAR|आधार|UIDAI|FATHER|पिता|DOB|MALE|FEMALE/i.test(text) ||
+    /PEMANENT|PERM[A4]NENTACCOUNT|FATHERS?NAME|ACCOUNTNUMBER/i.test(upper)
+  ) {
+    score += 35;
   }
-  if (/\bNAME\b|नाम/i.test(text)) score += 15;
+  if (/\bNAME\b|नाम|FATHERS?NAME/i.test(text)) score += 15;
   if (/\b(MALE|FEMALE)\b/i.test(text)) score += 25;
   if (/\d{2}[\/\-.]\d{2}[\/\-.]\d{4}/.test(text)) score += 25;
   if (/\b[A-Z]{2,}(?:\s+[A-Z]{1,}){1,3}\b/.test(upper)) score += 15;
@@ -91,20 +106,29 @@ function scoreOcrResult(result) {
     const hasId =
       /[A-Z]{5}[0-9OISB]{4}[A-Z]/.test(upper) ||
       /\d{4}[\s\-]?\d{4}[\s\-]?\d{4}/.test(text) ||
-      /INCOME|AADHAAR|GOVT|PAN|UIDAI/i.test(upper);
+      /INCOME|AADHAAR|GOVT|PAN|UIDAI|FATHER|PEMANENT|ACCOUNT/i.test(upper);
     if (!hasId) score -= 80;
     else score -= 10;
   }
 
-  const alnum = (text.match(/[A-Za-z0-9]/g) || []).length;
   const symbols = (text.match(/[^A-Za-z0-9\s]/g) || []).length;
   const total = Math.max(text.length, 1);
   if (symbols / total > 0.25) score -= 40;
-  if (alnum < 20) score -= 30;
 
   const tokens = text.split(/\s+/).filter(Boolean);
   const shortRatio = tokens.filter((t) => t.length <= 2).length / Math.max(tokens.length, 1);
+  const longWords = tokens.filter((t) => /[A-Za-z]{5,}/.test(t)).length;
+
+  // Prefer readable long tokens over high-alnum noise soup
+  if (alnum < 25) score -= 50;
+  else if (alnum < 40) score -= 15;
+  else if (longWords >= 3) score += Math.min(20, longWords * 2);
+  else score += Math.min(10, alnum / 40);
+
   if (shortRatio > 0.55 && tokens.length > 30) score -= 35;
+  // Low-confidence walls of alnum with few real words = noise
+  if (conf < 40 && alnum > 800 && longWords < 5) score -= 50;
+  if (conf < 35 && symbols / total > 0.15 && longWords < 4) score -= 25;
 
   return score;
 }

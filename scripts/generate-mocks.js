@@ -8,9 +8,9 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
 const sharp = require('sharp');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { pdfToPng } = require('../src/preprocessing/poppler');
 
 const OUT_DIR = path.resolve(__dirname, '../assets/mocks');
 
@@ -277,17 +277,18 @@ async function buildPdfBytes(title, lines) {
   return Buffer.from(await pdf.save());
 }
 
-function rasterizePdf(pdfPath, baseName) {
+async function rasterizePdf(pdfPath, baseName) {
   const tmpPrefix = path.join(OUT_DIR, `.tmp-${baseName}`);
-  const r = spawnSync(
-    'pdftoppm',
-    ['-png', '-r', '200', '-singlefile', pdfPath, tmpPrefix],
-    { encoding: 'utf8' }
-  );
-  if (r.status !== 0) {
-    throw new Error(`pdftoppm failed for ${pdfPath}: ${r.stderr || r.stdout}`);
+  await pdfToPng(pdfPath, tmpPrefix, 200);
+  // pdftoppm -singlefile isn't exposed the same way; take first page if multi
+  const candidates = [
+    `${tmpPrefix}.png`,
+    `${tmpPrefix}-1.png`,
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
   }
-  return `${tmpPrefix}.png`;
+  throw new Error(`pdfToPng produced no PNG for ${pdfPath}`);
 }
 
 async function writeFormats(variant) {
@@ -296,13 +297,23 @@ async function writeFormats(variant) {
   fs.writeFileSync(pdfPath, pdfBytes);
   console.log(`Wrote ${pdfPath}`);
 
-  const rasterPath = rasterizePdf(pdfPath, variant.id);
+  const rasterPath = await rasterizePdf(pdfPath, variant.id);
   const pngPath = path.join(OUT_DIR, `${variant.id}.png`);
   const jpgPath = path.join(OUT_DIR, `${variant.id}.jpg`);
 
   await sharp(rasterPath).png().toFile(pngPath);
   await sharp(rasterPath).jpeg({ quality: 92 }).toFile(jpgPath);
   fs.unlinkSync(rasterPath);
+  // clean leftover page-N files if any
+  for (const f of fs.readdirSync(OUT_DIR)) {
+    if (f.startsWith(`.tmp-${variant.id}`) && f.endsWith('.png')) {
+      try {
+        fs.unlinkSync(path.join(OUT_DIR, f));
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   console.log(`Wrote ${pngPath}`);
   console.log(`Wrote ${jpgPath}`);

@@ -11,7 +11,8 @@ async function correctCardOrientation(buffer, { skipIfExifUpright = false, meta 
     // no-op hint for callers; still run probes unless they skip entirely
   }
 
-  const angles = [0, 270, 90];
+  // Prefer sideways angles first — photo-in-PDF ID cards are usually rotated
+  const angles = [270, 90, 0, 180];
   let bestBuffer = buffer;
   let bestScore = -Infinity;
   let bestAngle = 0;
@@ -21,7 +22,7 @@ async function correctCardOrientation(buffer, { skipIfExifUpright = false, meta 
       angle === 0 ? buffer : await sharp(buffer).rotate(angle).toBuffer();
 
     const probe = await sharp(rotated)
-      .resize({ width: 900, withoutEnlargement: true })
+      .resize({ width: 700, withoutEnlargement: true })
       .modulate({ brightness: 1.25, saturation: 0.2 })
       .greyscale()
       .negate()
@@ -34,14 +35,23 @@ async function correctCardOrientation(buffer, { skipIfExifUpright = false, meta 
     const upper = (result.text || '').toUpperCase();
     if (/CAMSCANNER|SCANNED\s*BY/.test(upper) && score < 80) score -= 50;
 
-    const beatsBest =
-      angle === 0 ? score > bestScore : score >= bestScore + 20;
-    if (beatsBest) {
+    // ID-card cues (including OCR mashups like FathersName / PemanentAccount)
+    if (/INCOME|TAX|GOVT|GOVERNMENT|AADHAAR|AADHAR|UIDAI|PERMANENT|ACCOUNT|FATHER|DOB|MALE|FEMALE/i.test(upper)) {
+      score += 45;
+    }
+    if (/FATHERS?NAME|PEMANENT|PERM[A4]NENT|DEFART|DEPARTMENT/i.test(upper)) {
+      score += 35;
+    }
+    if (/\d{2}[\/\-.]\d{2}[\/\-.]\d{4}/.test(result.text || '')) score += 25;
+    if (/[A-Z]{5}[0-9OISB]{4}[A-Z]/.test(upper)) score += 40;
+
+    if (score > bestScore) {
       bestScore = score;
       bestBuffer = rotated;
       bestAngle = angle;
     }
-    if (angle === 0 && score >= 90) break;
+    // Strong ID cue — stop probing
+    if (score >= 90) break;
   }
 
   return { buffer: bestBuffer, angle: bestAngle, score: bestScore };

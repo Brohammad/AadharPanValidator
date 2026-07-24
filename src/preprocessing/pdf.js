@@ -1,12 +1,9 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { execFile } = require('child_process');
-const { promisify } = require('util');
 const sharp = require('sharp');
 const { PDFDocument } = require('pdf-lib');
 const config = require('../config');
-
-const execFileAsync = promisify(execFile);
+const { pdfImagesPng, pdfToPng } = require('./poppler');
 
 async function checkPdfEncryption(filePath) {
   const bytes = await fs.readFile(filePath);
@@ -30,12 +27,8 @@ async function extractEmbeddedImages(filePath, outputDir) {
   const prefix = path.join(outputDir, 'embed');
 
   try {
-    await execFileAsync('pdfimages', ['-png', filePath, prefix], {
-      timeout: 60000,
-      maxBuffer: 40 * 1024 * 1024,
-    });
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
+    await pdfImagesPng(filePath, prefix);
+  } catch {
     return [];
   }
 
@@ -64,28 +57,18 @@ async function extractEmbeddedImages(filePath, outputDir) {
 }
 
 /**
- * Fallback: rasterize PDF pages with Poppler.
+ * Fallback: rasterize PDF pages with Poppler (via node-poppler).
  */
 async function rasterizePdfPages(filePath, outputDir) {
   await fs.mkdir(outputDir, { recursive: true });
   const prefix = path.join(outputDir, 'page');
+  const dpi = config.pdfDpi || 200;
 
   try {
-    const dpi = String(config.pdfDpi || 200);
-    await execFileAsync(
-      'pdftoppm',
-      ['-png', '-r', dpi, filePath, prefix],
-      { timeout: 120000, maxBuffer: 40 * 1024 * 1024 }
-    );
+    await pdfToPng(filePath, prefix, dpi);
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      const missing = new Error(
-        'PDF conversion requires Poppler (pdftoppm). Install with: brew install poppler  (macOS) or  sudo apt install poppler-utils  (Linux)'
-      );
-      missing.status = 500;
-      throw missing;
-    }
-    const failed = new Error(`PDF conversion failed: ${err.stderr || err.message}`);
+    if (err.status === 500) throw err;
+    const failed = new Error(`PDF conversion failed: ${err.message}`);
     failed.status = 422;
     throw failed;
   }

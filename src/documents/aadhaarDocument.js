@@ -2,6 +2,7 @@ const BaseDocument = require('./baseDocument');
 const { validateAadhaar, extractAadhaarNumbers } = require('../validators/aadhaar');
 const { extractPersonName, extractDob, extractGender } = require('./fieldExtractors');
 const { scoreExtractionConfidence } = require('../pipeline/extractionConfidence');
+const { refineAadhaarOcr } = require('../ocr/aadhaarOcr');
 
 const MANDATORY_FIELDS = ['name', 'aadhaar'];
 const OPTIONAL_FIELDS = ['dob', 'yearOfBirth', 'gender', 'address'];
@@ -9,6 +10,10 @@ const OPTIONAL_FIELDS = ['dob', 'yearOfBirth', 'gender', 'address'];
 class AadhaarDocument extends BaseDocument {
   constructor() {
     super('AADHAAR', 'Aadhaar Card', { mode: 'verification' });
+  }
+
+  async refineOcr(ocrResult, page) {
+    return refineAadhaarOcr(ocrResult, page);
   }
 
   identify(features) {
